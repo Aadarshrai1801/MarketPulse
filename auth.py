@@ -303,29 +303,29 @@ def find_or_create_google_user(google_id, email, avatar_url=None):
     doc = db.users.find_one({"google_id": google_id})
     if doc:
         user = _doc_to_dict(doc)
-        if not user["is_active"]:
+        if not user["is_active"]: #type: ignore
             return None
         db.users.update_one(
-            {"id": user["id"]},
+            {"id": user["id"]}, #type: ignore
             {"$set": {"avatar_url": avatar_url, "last_login_at": now}},
         )
-        user["avatar_url"] = avatar_url
-        user["last_login_at"] = now
+        user["avatar_url"] = avatar_url #type: ignore
+        user["last_login_at"] = now #type: ignore
         return user
 
     doc = db.users.find_one({"username": email})
     if doc:
         user = _doc_to_dict(doc)
-        if not user["is_active"]:
+        if not user["is_active"]: #type: ignore
             return None
         db.users.update_one(
-            {"id": user["id"]},
+            {"id": user["id"]}, #type: ignore
             {"$set": {
                 "google_id": google_id, "auth_provider": "google",
                 "avatar_url": avatar_url, "last_login_at": now,
             }},
         )
-        user.update(google_id=google_id, auth_provider="google", avatar_url=avatar_url, last_login_at=now)
+        user.update(google_id=google_id, auth_provider="google", avatar_url=avatar_url, last_login_at=now) #type: ignore
         return user
 
     # Brand-new account. It still gets a (random, unusable) password hash so

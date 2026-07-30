@@ -57,7 +57,7 @@ PRODUCTS = [
         "name": "Red Onion",
         "emoji": "🧅",
         "keywords": {
-            "barakat": "Red Onions",
+            "barakat": "onion",
             "kibsons": "Red Onion",
             "unioncoop": "red onion",
             "carrefour": "onion",
@@ -83,7 +83,7 @@ PRODUCTS = [
         "keywords": {
             "barakat": "Orange Valencia",
             "kibsons": "Valencia Orange",
-            "unioncoop": "Orange",
+            "unioncoop": "Orange valencia",
             "carrefour": "Valencia Orange",
             "lulu": "Valencia Orange",
         },
@@ -95,7 +95,7 @@ PRODUCTS = [
         "keywords": {
             "barakat": "orange navel",
             "kibsons": "orange",
-            "unioncoop": "Orange Navel",
+            "unioncoop": "navel orange",
             "carrefour": "Orange Navel",
             "lulu": "Navel Orange",
         },
