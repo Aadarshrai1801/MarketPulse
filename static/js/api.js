@@ -325,13 +325,45 @@ export async function ocrScan(file) {
   return response.json(); // expected: { items: [{ product, price, confidence }], confidence }
 }
 
+// Only the most recent 30 days are shown in the Fetch & Analyse pivot table.
+// This is a display-only trim: the backend/MongoDB still hold (and return)
+// the full price_history, we just slice the tail off here before rendering.
+const HISTORY_DISPLAY_DAYS = 30;
+
+function last30Days(dates) {
+  const sorted = [...(dates || [])].sort(); // ISO yyyy-mm-dd sorts chronologically as strings
+  return sorted.slice(-HISTORY_DISPLAY_DAYS);
+}
+
 export function mapHistoryResponse(data) {
+  const allDates = data.dates || [];
+  const dates = last30Days(allDates);
+  const dateSet = new Set(dates);
+
+  const rows = (data.rows || []).map((row) => {
+    const prices = row.prices || {};
+    const origins = row.origins || {};
+    const filteredPrices = {};
+    const filteredOrigins = {};
+    Object.keys(prices).forEach((date) => {
+      if (dateSet.has(date)) filteredPrices[date] = prices[date];
+    });
+    Object.keys(origins).forEach((date) => {
+      if (dateSet.has(date)) filteredOrigins[date] = origins[date];
+    });
+    return { ...row, prices: filteredPrices, origins: filteredOrigins };
+  }).filter((row) => Object.keys(row.prices).length > 0); // drop rows with no data in the window
+
+  const distinctProducts = new Set(rows.map((r) => r.product_id || r.product_label));
+  const distinctRetailers = new Set(rows.map((r) => r.retailer_id || r.retailer_label || r.retailer));
+
   return {
-    dates: data.dates || [],
-    rows: (data.rows || []).map((row) => ({
-      ...row,
-      prices: row.prices || {},
-    })),
-    counts: data.counts || { dates: 0, products: 0, retailers: 0 },
+    dates,
+    rows,
+    counts: {
+      dates: dates.length,
+      products: distinctProducts.size,
+      retailers: distinctRetailers.size,
+    },
   };
 }
