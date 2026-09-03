@@ -29,7 +29,6 @@ on:
         description: "Retailer to push (or 'all')"
         required: true
         type: choice
-        type: choice
         options:
           - all
           - carrefour
