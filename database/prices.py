@@ -6,7 +6,7 @@ One document per (product, retailer, day) - if a scrape already ran today
 for this product+retailer, it's overwritten in place rather than duplicated.
 """
 
-from db import get_db
+from .connection import get_db
 
 
 def save_price_record(data, product_id=None, product_label=None):

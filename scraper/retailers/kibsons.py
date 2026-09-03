@@ -18,8 +18,8 @@ import re
 import time
 from datetime import datetime
 
-from .config import SITE_SEARCH_CONFIG
-from .utils import (
+from ..config import SITE_SEARCH_CONFIG
+from ..utils import (
     fetch_fast,
     fetch_stealthy,
     fetch_with_fallback,
@@ -262,7 +262,7 @@ def _record_from_product_url(url):
 
 
 def scrape(url):
-    from .utils import parse_weight_to_kg
+    from ..utils import parse_weight_to_kg
 
     config = SITE_SEARCH_CONFIG[SITE]
     mode = config.get("fetch_mode", "fast")

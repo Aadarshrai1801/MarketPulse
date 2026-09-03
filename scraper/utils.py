@@ -36,18 +36,6 @@ _BLOCK_MARKERS = (
 )
 
 
-def launch_stealth_browser(playwright):  # pragma: no cover
-    """Kept so old imports fail loudly instead of silently.
-
-    Playwright was removed in favour of Scrapling (free-Render friendly).
-    Use :func:`fetch_with_fallback` instead.
-    """
-    raise RuntimeError(
-        "launch_stealth_browser() was removed with Playwright. "
-        "Use scraper.utils.fetch_with_fallback() (Scrapling Fetcher) instead."
-    )
-
-
 def _page_text(page, limit=200000):
     """Best-effort visible text of a Scrapling Response/Selector."""
     # 1. Raw body decode (fastest, always available as bytes on Response).

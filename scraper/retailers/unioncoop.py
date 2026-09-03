@@ -15,8 +15,8 @@ HTTP.
 import re
 from datetime import datetime
 
-from .config import SITE_SEARCH_CONFIG
-from .utils import (
+from ..config import SITE_SEARCH_CONFIG
+from ..utils import (
     fetch_fast,
     fetch_with_fallback,
     iter_links,

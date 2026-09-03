@@ -1,8 +1,6 @@
 import os
-import re
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template
 
@@ -19,25 +17,25 @@ except Exception:  # ImportError, OOM-prone paddle missing, etc.
     preprocess_image = run_ocr = extract_table = None  # type: ignore
     OCR_AVAILABLE = False
 
-from scraper import (
-    SITE_SEARCH_CONFIG,
-    find_product_url,
-    get_product_details,
-    save_price_record,
-    get_price_history,
-    save_latest_fetch,
-    get_latest_fetch,
-)
-from products_config import (
+from database import get_db, get_status as get_db_status, get_latest_fetch
+from catalog import (
     RETAILER_LABELS,
-    get_search_keyword,
     get_all_products,
     get_all_products_by_id,
     add_custom_product,
     delete_custom_product,
 )
+from services import (
+    RETAILERS,
+    price_to_float,
+    resolve_retailers,
+    resolve_products,
+    scrape_one,
+    JOBS,
+    JOBS_LOCK,
+    run_fetch_job,
+)
 from auth import auth_bp, init_auth, login_required, role_required
-from db import get_db, get_status as get_db_status
 
 app = Flask(__name__)
 
@@ -94,117 +92,6 @@ app.register_blueprint(auth_bp)
 UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-
-RETAILERS = list(SITE_SEARCH_CONFIG.keys())
-
-# In-memory job store for the async fetch API - fine for single-device use
-# (resets if the app restarts, which is expected here).
-JOBS = {}
-JOBS_LOCK = threading.Lock()
-
-
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
-
-def _price_to_float(text):
-    if not text:
-        return None
-    m = re.search(r"(\d+(?:\.\d+)?)", text)
-    return float(m.group(1)) if m else None
-
-def get_previous_price(product_id, retailer):
-    """
-    Returns the previous saved price for the same product and retailer,
-    ignoring the current price if it is already the newest entry.
-    """
-    history = get_price_history(product_id, retailer)
-
-    if len(history) < 2:
-        return None
-
-    return history[-2]["price"]
-
-
-def _resolve_retailers(retailer_param):
-    if not retailer_param or retailer_param == "all":
-        return RETAILERS
-    if retailer_param not in SITE_SEARCH_CONFIG:
-        return []
-    return [retailer_param]
-
-
-def _resolve_products(product_param):
-    if not product_param or product_param == "all":
-        return get_all_products()
-    p = get_all_products_by_id().get(product_param)
-    return [p] if p else []
-
-
-def _scrape_one(product, retailer):
-    """Run one product x retailer lookup, save it if it succeeds, and
-    always return a plain-dict result (never raises)."""
-    keyword = get_search_keyword(product, retailer)
-
-    try:
-        url = find_product_url(retailer, keyword)
-        data = get_product_details(url, retailer)
-        
-        # Use per_kg_price, not "price" - that's the field every retailer
-        # module actually returns (Carrefour returns both, but Barakat,
-        # Kibsons, LuLu, and Union Coop only ever set per_kg_price), and
-        # it's also the exact column get_previous_price() reads history
-        # from below, so this keeps current vs. previous comparing
-        # like-for-like.
-        current_price = _price_to_float(data.get("per_kg_price"))
-
-        previous_price = get_previous_price(product["id"], retailer)
-
-        data["previous_price"] = previous_price
-
-        # Guard against either side being None (e.g. this scrape failed to
-        # find a price, or there's no usable history yet) - comparing None
-        # to a float raises TypeError and used to crash the whole job once
-        # enough history had built up.
-        if previous_price is None or current_price is None:
-            data["price_change"] = "same"
-        elif current_price > previous_price:
-            data["price_change"] = "up"
-        elif current_price < previous_price:
-            data["price_change"] = "down"
-        else:
-            data["price_change"] = "same"
-                
-        data["ok"] = True
-        data["product_id"] = product["id"]
-        data["product_label"] = product["name"]
-        data["product_emoji"] = product["emoji"]
-
-        save_price_record(
-            data,
-            product_id=product["id"],
-            product_label=product["name"],
-        )
-        # Overwrites (rather than appends to) the one row this product+retailer
-        # has in `latest_fetch` - this is what /api/latest and the "Latest Fetch
-        # Results" table read from, so that table always shows only the newest
-        # scrape per product+retailer, persisted server-side in MongoDB.
-        save_latest_fetch(
-            data,
-            product_id=product["id"],
-            product_label=product["name"],
-        )
-        return data
-    except Exception as e:
-        return {
-            "ok": False,
-            "supermarket": retailer,
-            "product_id": product["id"],
-            "product_label": product["name"],
-            "product_emoji": product["emoji"],
-            "keyword_used": keyword,
-            "error": str(e),
-        }
 
 
 # ------------------------------------------------------------------
@@ -312,8 +199,8 @@ def api_fetch():
     retailer_param = (payload.get("retailer") or "all").strip().lower()
     product_param = (payload.get("product") or "all").strip().lower()
 
-    retailers = _resolve_retailers(retailer_param)
-    products = _resolve_products(product_param)
+    retailers = resolve_retailers(retailer_param)
+    products = resolve_products(product_param)
 
     if not retailers:
         return jsonify({"ok": False, "error": f"Unknown retailer '{retailer_param}'."}), 400
@@ -321,7 +208,7 @@ def api_fetch():
         return jsonify({"ok": False, "error": f"Unknown product '{product_param}'."}), 400
 
     results = [
-        _scrape_one(product, retailer)
+        scrape_one(product, retailer)
         for product in products
         for retailer in retailers
     ]
@@ -337,56 +224,6 @@ def api_fetch():
 # API: async jobs (submit now, poll for progress/results later)
 # ------------------------------------------------------------------
 
-# Free Render has 0.5 CPU / 512MB RAM: Scrapling Fetcher rows are I/O-bound
-# (~2-5s each), so a small thread pool cuts all/all (40 lookups) from
-# minutes to ~30s without the RAM spike a browser pool would cause.
-FETCH_WORKERS = int(os.environ.get("FETCH_WORKERS", "5"))
-
-
-def _run_fetch_job(job_id, retailers, products):
-    pairs = [(product, retailer) for product in products for retailer in retailers]
-    if not pairs:
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
-            if job is not None:
-                job["status"] = "done"
-                job["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        return
-
-    workers = max(1, min(FETCH_WORKERS, len(pairs)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_pair = {
-            pool.submit(_scrape_one, product, retailer): (product, retailer)
-            for product, retailer in pairs
-        }
-        for future in as_completed(future_to_pair):
-            try:
-                result = future.result()
-            except Exception as e:  # _scrape_one never raises, but stay safe
-                product, retailer = future_to_pair[future]
-                result = {
-                    "ok": False,
-                    "supermarket": retailer,
-                    "product_id": product["id"],
-                    "product_label": product["name"],
-                    "product_emoji": product.get("emoji", "🥬"),
-                    "error": str(e),
-                }
-
-            with JOBS_LOCK:
-                job = JOBS.get(job_id)
-                if job is None:
-                    return  # job was cleared/removed while running
-                job["results"].append(result)
-                job["completed"] += 1
-
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if job is not None:
-            job["status"] = "done"
-            job["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
 @app.route("/api/jobs", methods=["POST"])
 @role_required("editor", "admin")
 def api_create_job():
@@ -399,8 +236,8 @@ def api_create_job():
     retailer_param = (payload.get("retailer") or "all").strip().lower()
     product_param = (payload.get("product") or "all").strip().lower()
 
-    retailers = _resolve_retailers(retailer_param)
-    products = _resolve_products(product_param)
+    retailers = resolve_retailers(retailer_param)
+    products = resolve_products(product_param)
 
     if not retailers:
         return jsonify({"ok": False, "error": f"Unknown retailer '{retailer_param}'."}), 400
@@ -423,7 +260,7 @@ def api_create_job():
         }
 
     thread = threading.Thread(
-        target=_run_fetch_job,
+        target=run_fetch_job,
         args=(job_id, retailers, products),
         daemon=True,
     )
@@ -475,12 +312,6 @@ def api_history():
     retailer_param = (request.args.get("retailer") or "all").strip().lower()
     product_param = (request.args.get("product") or "all").strip().lower()
 
-    empty = {
-        "dates": [],
-        "rows": [],
-        "counts": {"dates": 0, "products": 0, "retailers": 0},
-    }
-
     query = {}
     if product_param != "all":
         query["product_id"] = product_param
@@ -506,7 +337,7 @@ def api_history():
             continue
 
         date_iso = str(timestamp)[:10]
-        price = _price_to_float(doc.get("per_kg_price"))
+        price = price_to_float(doc.get("per_kg_price"))
         date_set.add(date_iso)
 
         key = (product_id, retailer)

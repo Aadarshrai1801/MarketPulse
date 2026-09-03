@@ -1,8 +1,8 @@
 """
 MongoDB connection layer for MarketPulse / IntelliCrop.
 
-Centralizes the Mongo client so every module (auth.py, scraper/mongo_store.py,
-app.py) shares one connection instead of opening its own. Configure via
+Centralizes the Mongo client so every module (auth/, scraper/,
+services/, app.py) shares one connection instead of opening its own. Configure via
 environment variables - never hardcode credentials in source:
 
     MONGODB_URI    - full connection string, e.g.

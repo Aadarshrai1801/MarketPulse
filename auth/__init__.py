@@ -40,7 +40,7 @@ from flask import Blueprint, request, jsonify, session, render_template, redirec
 from werkzeug.security import generate_password_hash, check_password_hash
 from pymongo.errors import DuplicateKeyError
 
-from db import get_db, next_sequence, ensure_indexes
+from database import get_db, next_sequence, ensure_indexes
 
 ROLES = ("viewer", "editor", "admin")
 ROLE_RANK = {"viewer": 0, "editor": 1, "admin": 2}

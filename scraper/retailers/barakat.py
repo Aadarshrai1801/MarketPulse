@@ -12,8 +12,8 @@ import re
 import time
 from datetime import datetime
 
-from .config import SITE_SEARCH_CONFIG
-from .utils import (
+from ..config import SITE_SEARCH_CONFIG
+from ..utils import (
     fetch_with_fallback,
     css_first_text,
     css_all_text,

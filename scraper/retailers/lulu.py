@@ -11,8 +11,8 @@ import re
 from datetime import datetime
 from urllib.parse import quote
 
-from .config import SITE_SEARCH_CONFIG
-from .utils import (
+from ..config import SITE_SEARCH_CONFIG
+from ..utils import (
     fetch_with_fallback,
     iter_links,
     rank_links,

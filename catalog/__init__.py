@@ -151,7 +151,7 @@ def get_custom_products():
     or reachable, so /api/meta and the scraper still work with just the
     built-in catalog when Mongo is down.
     """
-    from db import get_db
+    from database import get_db
     try:
         db = get_db()
         return list(db.products.find({}, {"_id": 0}))
@@ -175,7 +175,7 @@ def add_custom_product(name, emoji=None):
     for any retailer without an explicit override, which is exactly what
     a freshly-added product needs to be scrapable immediately.
     """
-    from db import get_db
+    from database import get_db
 
     name = (name or "").strip()
     if not name:
@@ -202,7 +202,7 @@ def add_custom_product(name, emoji=None):
 
 def delete_custom_product(product_id):
     """Deletes a custom product. Built-in products can't be deleted this way."""
-    from db import get_db
+    from database import get_db
 
     if product_id in PRODUCTS_BY_ID:
         raise ValueError("Built-in products can't be deleted.")

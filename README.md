@@ -9,42 +9,58 @@ editor / admin), and optional "Continue with Google" sign-in.
 
 ## Files
 
-- `scraper/` — a package, split one file per retailer so you can fix or
+- `app.py` — thin Flask web layer: app setup, page + API routes only.
+  Business logic lives in `services/`, storage in `database/`.
+- `services/` — backend logic with no HTTP in it:
+  - `fetch.py` — `resolve_retailers` / `resolve_products` /
+    `scrape_one` (one product × retailer lookup + persist).
+  - `jobs.py` — in-memory `JOBS` store + `run_fetch_job`
+    (thread-pool fan-out). *(See Deployment notes if you run more
+    than one worker.)*
+- `scraper/` — one file per retailer so you can fix or
   extend one site without touching the others:
   - `config.py` — `SITE_SEARCH_CONFIG` plus per-retailer `fetch_mode`
     (`"fast"` = plain HTTP only, `"auto"` = HTTP first with a stealthy
     browser fallback if blocked). Edit search URLs/selectors here.
   - `utils.py` — shared helpers: `fetch_with_fallback` (Scrapling
     `Fetcher` by default, `StealthyFetcher` only when needed),
-    `parse_weight_to_kg`, `parse_price_value`.
-  - `carrefour.py`, `lulu.py`, `barakat.py`, `kibsons.py`, `unioncoop.py`
-    — each has just two functions: `find_url(product_name)` and
-    `scrape(url)`.
-  - `mongo_store.py` — `save_price_record` / `get_price_history`,
-    including the "update today's record instead of duplicating it"
-    logic (upsert on product+retailer+date).
+    `parse_weight_to_kg`, `parse_price_value`, `compute_per_kg`.
+  - `retailers/carrefour.py`, `retailers/lulu.py`,
+    `retailers/barakat.py`, `retailers/kibsons.py`,
+    `retailers/unioncoop.py` — each has just two functions:
+    `find_url(product_name)` and `scrape(url)`.
   - `__init__.py` — the only file anything outside `scraper/` imports
     from. Re-exports `SITE_SEARCH_CONFIG`, `find_product_url`,
-    `get_product_details`, `save_price_record`, `get_price_history`.
+    `get_product_details` (storage comes from `database/`).
   - **Adding a 6th retailer:** add its config to `config.py`, create
-    `scraper/newsite.py` with `find_url()`/`scrape()`, then register it
-    in the two dicts at the top of `scraper/__init__.py`.
-- `products_config.py` — the canonical product catalog. The frontend
-  dropdown always shows/uses `name` (e.g. "Red Onion") — the **same
-  keyword for every retailer**. If a specific retailer's search only
-  matches a different term, add a one-line override in that product's
-  `keywords` dict; the frontend never sees it, only the scraper does,
-  via `get_search_keyword(product, retailer)`.
-- `db.py` — the single MongoDB connection used everywhere (`get_db()`),
-  plus `get_status()` (used by the admin "Database Settings" panel) and
-  `ensure_indexes()` (called on every startup).
-- `auth.py` — session-based login, MongoDB-backed users (`users`
+    `scraper/retailers/newsite.py` with `find_url()`/`scrape()`, then
+    register it in the two dicts at the top of `scraper/__init__.py`.
+- `database/` — all MongoDB access in one place:
+  - `connection.py` — the single shared client (`get_db()`), plus
+    `get_status()` (used by the admin "Database Settings" panel) and
+    `ensure_indexes()` (called on every startup).
+  - `prices.py` — `save_price_record` / `get_price_history` /
+    `save_latest_fetch` / `get_latest_fetch`, including the "update
+    today's record instead of duplicating it" logic (upsert on
+    product+retailer+date).
+- `catalog/` — the canonical product catalog (`PRODUCTS`,
+  `RETAILER_LABELS`, `get_search_keyword`). The frontend dropdown always
+  shows/uses `name` (e.g. "Red Onion") — the **same keyword for every
+  retailer**. If a specific retailer's search only matches a different
+  term, add a one-line override in that product's `keywords` dict; the
+  frontend never sees it, only the scraper does. User-added products
+  persist in the `products` collection via `add_custom_product` /
+  `delete_custom_product`.
+- `auth/` — session-based login, MongoDB-backed users (`users`
   collection), three roles (viewer / editor / admin), optional Google
   OAuth. Also seeds a default admin account on first run (see
   **Environment variables** below — set these before your first deploy).
+- `ocr/` — receipt / price-list image scanning (`ocr.py`, PaddleOCR —
+  optional on slim hosts). `scripts/ocr_demo.py` demos the pipeline on
+  a synthesized sheet.
 - `scripts/migrate_to_mongo.py` — one-time script that copies your
   existing `users.db` and `products.xlsx` into MongoDB. Safe to re-run.
-- `app.py` — Flask backend:
+- `app.py` — Flask backend (routes only):
   - `GET /api/meta` — retailer + product lists for the dropdowns.
   - `POST /api/fetch` — **synchronous.** Runs the scraper for the
     selected retailer(s) × product(s) and blocks until done. Fine for a
@@ -191,8 +207,8 @@ Before pointing a real domain at this app:
 7. **Unioncoop / Kibsons oranges on hosting IPs.** Unioncoop's WAF
     answers search requests from datacenter IPs (Render) with HTTP 405,
     and Kibsons' catalog API doesn't list navel/valencia oranges. Both
-    cases resolve via verified product-URL tables (`KNOWN_URLS` in
-    `scraper/unioncoop.py` / `scraper/kibsons.py`) — each URL is
+    cases resolve     via verified product-URL tables (`KNOWN_URLS` in
+    `scraper/retailers/unioncoop.py` / `scraper/retailers/kibsons.py`) — each URL is
     re-verified live (status + title + price) before use, so a renamed
     product fails loudly instead of recording a stale price.
 7. **Rate-limit `/api/auth/login`** (e.g. with `Flask-Limiter`) — it's

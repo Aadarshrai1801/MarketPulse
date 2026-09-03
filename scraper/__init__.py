@@ -1,30 +1,31 @@
 """
 Public API of the `scraper` package - this is the only file other code
-(app.py, products_config.py) needs to import from, and its surface is
+(app.py, services/fetch.py) needs to import from, and its surface is
 unchanged from when this used to be a single scraper.py:
 
     from scraper import SITE_SEARCH_CONFIG, find_product_url, get_product_details, save_price_record
 
 Internally, each retailer now lives in its own module
-(scraper/carrefour.py, scraper/lulu.py, etc.) with two functions:
+(scraper/retailers/carrefour.py, scraper/retailers/lulu.py, etc.) with
+two functions:
 
     find_url(product_name) -> product page URL, or raises ValueError
     scrape(url)             -> dict of scraped product details
 
 To add a new retailer:
   1. Add its entry to SITE_SEARCH_CONFIG in config.py.
-  2. Create scraper/<retailer>.py with find_url() and scrape().
+  2. Create scraper/retailers/<retailer>.py with find_url() and scrape().
   3. Import it below and add one line each to _FINDERS and _SCRAPERS.
-That's it - app.py and products_config.py don't need to change.
+That's it - app.py and catalog don't need to change.
 
-Price storage lives in MongoDB (see mongo_store.py / db.py).
+Price storage lives in MongoDB (see the database/ package).
 """
 
 from .config import SITE_SEARCH_CONFIG
-from .mongo_store import save_price_record, get_price_history, save_latest_fetch, get_latest_fetch
-from .utils import parse_weight_to_kg, parse_price_value, format_per_kg, compute_per_kg
+from database.prices import save_price_record, get_price_history, save_latest_fetch, get_latest_fetch
+from .utils import parse_weight_to_kg, parse_price_value
 
-from . import carrefour, lulu, barakat, kibsons, unioncoop
+from .retailers import carrefour, lulu, barakat, kibsons, unioncoop
 
 _FINDERS = {
     "carrefour": carrefour.find_url,

@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from openpyxl import load_workbook
 
-from db import get_db, ensure_indexes
+from database import get_db, ensure_indexes
 
 USERS_DB_PATH = os.environ.get("USERS_DB_PATH", "users.db")
 EXCEL_PATH = os.environ.get("PRODUCTS_XLSX_PATH", "products.xlsx")
@@ -191,7 +191,7 @@ def migrate_firebase_history():
 
         try:
             # "12/06/2026, 9:44:33 AM" -> "2026-06-12 09:44:33", to match the
-            # timestamp format already used by mongo_store.py / products.xlsx.
+            # timestamp format already used by database/prices.py / products.xlsx.
             timestamp = datetime.strptime(
                 row["Fetched At"].strip(), "%d/%m/%Y, %I:%M:%S %p"
             ).strftime("%Y-%m-%d %H:%M:%S")

@@ -278,7 +278,7 @@ export function mapScrapeResult(item) {
 }
 
 // Latest-fetch snapshot from MongoDB (one row per product+retailer,
-// always the most recent scrape - see /api/latest and scraper/mongo_store.py's
+// always the most recent scrape - see /api/latest and database/prices.py's
 // save_latest_fetch). This is what backs the "Latest Fetch Results" table now,
 // instead of the old browser-only localStorage cache.
 export async function loadLatestFetch() {
