@@ -113,11 +113,13 @@ the first run on any server other machines can reach.**
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Recommended | Sets the first admin account's credentials on first run (instead of the `admin` / `admin123` default). Set these *before* the first request ever hits the app in production. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` | Optional | Enables the "Continue with Google" button. Create credentials at the [Google Cloud Console](https://console.cloud.google.com/apis/credentials); `GOOGLE_REDIRECT_URI` must exactly match an authorized redirect URI there, e.g. `https://yourdomain.com/auth/google/callback`. |
 | `GOOGLE_DEFAULT_ROLE` | Optional | Role assigned to new accounts created via Google sign-in. Defaults to `viewer`. |
+| `DISABLED_RETAILERS` | Optional | Comma-separated retailer ids to hide from the UI and skip in jobs (e.g. `DISABLED_RETAILERS=unioncoop`). For hosts whose datacenter IPs a site's WAF blocks — Unioncoop rejects Render egress (search 405s and even product pages fail), so set this on Render and run 32/32 there; leave unset locally to keep all 5 retailers. |
+| `FETCH_WORKERS` | Optional | Job thread-pool size. Defaults to `3` (safe for 512MB Render free). Raise only on hosts with headroom. |
 
 Keep these in a local `.env` (not committed — see `.env.example` for a
 template) for development, and in your host's secret manager for
 production — never commit real values. `.env` is loaded automatically
-via `python-dotenv` (see `db.py`).
+via `python-dotenv` (see `database/connection.py`).
 
 ## MongoDB setup
 

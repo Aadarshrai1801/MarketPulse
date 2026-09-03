@@ -59,6 +59,9 @@ SITE_SEARCH_CONFIG = {
         "base_url": "https://www.unioncoop.ae",
         # Search listing is JS-rendered: try plain HTTP first, then the
         # stealthy browser only when it yields no product links.
+        # NOTE: Unioncoop's WAF blocks hosting datacenter IPs entirely
+        # (Render gets 405 on search AND product pages), so set
+        # DISABLED_RETAILERS=unioncoop on such hosts.
         # Product pages themselves are server-rendered (span.base,
         # data-price-amount), so scrape() stays on plain HTTP.
         "fetch_mode": "auto",

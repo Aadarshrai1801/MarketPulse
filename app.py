@@ -26,7 +26,8 @@ from catalog import (
     delete_custom_product,
 )
 from services import (
-    RETAILERS,
+    available_retailers,
+    disabled_retailers,
     price_to_float,
     resolve_retailers,
     resolve_products,
@@ -111,10 +112,13 @@ def index():
 @app.route("/api/meta")
 @login_required
 def api_meta():
+    # available_retailers() hides retailers disabled via DISABLED_RETAILERS
+    # (e.g. unioncoop on hosts whose datacenter IPs its WAF blocks), so the
+    # UI never offers a retailer the backend can't fetch.
     return jsonify({
         "retailers": [
             {"id": r, "name": RETAILER_LABELS.get(r, r.capitalize())}
-            for r in RETAILERS
+            for r in available_retailers()
         ],
         "products": [
             {"id": p["id"], "name": p["name"], "emoji": p["emoji"], "custom": bool(p.get("custom"))}
@@ -203,6 +207,8 @@ def api_fetch():
     products = resolve_products(product_param)
 
     if not retailers:
+        if retailer_param in disabled_retailers():
+            return jsonify({"ok": False, "error": f"Retailer '{retailer_param}' is disabled on this host."}), 400
         return jsonify({"ok": False, "error": f"Unknown retailer '{retailer_param}'."}), 400
     if not products:
         return jsonify({"ok": False, "error": f"Unknown product '{product_param}'."}), 400
@@ -240,6 +246,8 @@ def api_create_job():
     products = resolve_products(product_param)
 
     if not retailers:
+        if retailer_param in disabled_retailers():
+            return jsonify({"ok": False, "error": f"Retailer '{retailer_param}' is disabled on this host."}), 400
         return jsonify({"ok": False, "error": f"Unknown retailer '{retailer_param}'."}), 400
     if not products:
         return jsonify({"ok": False, "error": f"Unknown product '{product_param}'."}), 400

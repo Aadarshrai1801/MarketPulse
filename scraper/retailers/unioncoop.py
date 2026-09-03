@@ -1,15 +1,16 @@
 """
 Union Coop via Scrapling - fast HTTP first, stealthy browser if needed,
-verified product-URL fallback for hosted datacenter IPs.
+verified product-URL fallback for flaky search.
 
 The search listing is JS-rendered (static fetch returns the page shell with
 no product links), so find_url() retries via the stealthy browser when the
-fast pass yields nothing. Unioncoop's WAF also rejects search requests from
-hosting datacenter IPs (HTTP 405 on Render) - for that case a table of
-verified product URLs (checked live, resolved per product) is used, so the
-hosted run succeeds with zero browser. Product pages themselves are
-server-rendered (span.base, data-price-amount), so scrape() stays on plain
-HTTP.
+fast pass yields nothing. A table of verified product URLs covers search
+outages (each re-verified live before use). NOTE: Unioncoop's WAF rejects
+hosting datacenter IPs outright (Render: search 405s AND product pages fail
+verification), so no HTTP path works from such hosts - set
+DISABLED_RETAILERS=unioncoop there (see services/fetch.py) and run the
+other 4 retailers. Product pages themselves are server-rendered
+(span.base, data-price-amount), so scrape() stays on plain HTTP.
 """
 
 import re
@@ -120,13 +121,14 @@ def find_url(product_name):
     # Stage 3: verified known-URL fallback (no browser needed) - this is
     # what saves the hosted run when the WAF blocks datacenter search.
     known = _known_url_for(product_name)
-    if known and _verify_known_url(known):
-        return known
+    known_ok, known_reason = _check_known_url(known) if known else (False, "no known URL")
+    if known_ok:
+        return known  # type: ignore[return-value]
 
     if search_error is not None:
         raise RuntimeError(
             f"Unioncoop search blocked ({search_error}); "
-            f"and no verified product URL for '{product_name}'."
+            f"known product page unverified ({known_reason})."
         ) from None
     print(f"[unioncoop] 0 results for '{product_name}' - url: {search_url}")
     raise ValueError(f"Couldn't find '{product_name}' on {SITE}.")
@@ -158,24 +160,39 @@ def _known_url_for(product_name):
 
 
 def _verify_known_url(url):
-    """Live check: status 200 + a title + a price on the product page."""
+    """Back-compat wrapper: True/False only (see _check_known_url)."""
+    ok, _reason = _check_known_url(url)
+    return ok
+
+
+def _check_known_url(url):
+    """Live check: status 200 + a title + a price on the product page.
+
+    Returns (ok, reason) - the reason names the exact failing stage so a
+    hosted run can tell "product pages blocked too (HTTP 4xx)" apart from
+    "page changed shape" without guessing.
+    """
+    if not url:
+        return False, "no known URL"
     try:
         page = fetch_fast(url, timeout=30)
-    except Exception:
-        return False
+    except Exception as e:
+        return False, f"product page fetch failed ({e})"
     try:
         title = page.css("span.base::text").get()  # type: ignore[attr-defined]
         if not title or not str(title).strip():
             title = page.css("h1::text").get()  # type: ignore[attr-defined]
         if not title or not str(title).strip():
-            return False
+            return False, "product page has no title"
         amount = page.css("[data-price-amount]::attr(data-price-amount)").get()  # type: ignore[attr-defined]
         if amount and float(str(amount).strip()) > 0:
-            return True
+            return True, "ok"
         body = _page_text(page, limit=20000)
-        return bool(re.search(r"\d+\.\d{2}", body))
-    except Exception:
-        return False
+        if re.search(r"\d+\.\d{2}", body):
+            return True, "ok"
+        return False, "product page has no price"
+    except Exception as e:
+        return False, f"product page parse failed ({e})"
 
 
 def scrape(url):

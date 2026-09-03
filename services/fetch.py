@@ -5,6 +5,7 @@ runner in :mod:`services.jobs`. The web layer (app.py) only resolves the
 request params via :func:`resolve_retailers` / :func:`resolve_products`
 and calls :func:`scrape_one` - it never touches retailer modules directly.
 """
+import os
 import re
 
 from catalog import (
@@ -20,6 +21,27 @@ from database.prices import (
 from scraper import SITE_SEARCH_CONFIG, find_product_url, get_product_details
 
 RETAILERS = list(SITE_SEARCH_CONFIG.keys())
+
+
+def disabled_retailers():
+    """Retailer ids disabled via DISABLED_RETAILERS env (comma-separated).
+
+    Escape hatch for hosts whose egress a site blocks: Unioncoop's WAF
+    rejects requests from hosting datacenter IPs (search 405s AND product
+    pages fail verification), so on Render set DISABLED_RETAILERS=unioncoop
+    and jobs run 32/32 instead of 32 ok + 8 doomed rows. Local runs leave
+    it unset and keep all 5 retailers.
+    """
+    return {
+        r.strip().lower()
+        for r in os.environ.get("DISABLED_RETAILERS", "").split(",")
+        if r.strip()
+    }
+
+
+def available_retailers():
+    """RETAILERS minus disabled ones - what the UI offers and jobs run."""
+    return [r for r in RETAILERS if r not in disabled_retailers()]
 
 
 def price_to_float(text):
@@ -44,8 +66,10 @@ def get_previous_price(product_id, retailer):
 
 def resolve_retailers(retailer_param):
     if not retailer_param or retailer_param == "all":
-        return RETAILERS
+        return available_retailers()
     if retailer_param not in SITE_SEARCH_CONFIG:
+        return []
+    if retailer_param in disabled_retailers():
         return []
     return [retailer_param]
 
