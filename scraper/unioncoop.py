@@ -18,6 +18,7 @@ from .utils import (
     rank_links,
     css_first_text,
     _page_text,
+    format_per_kg,
 )
 
 SITE = "unioncoop"
@@ -156,7 +157,7 @@ def scrape(url):
 
     if price is not None:
         if re.search(r"/\s*kg\b", box_text, re.IGNORECASE):
-            per_kg_price = f"AED {price:.2f}/kg"
+            per_kg_price = format_per_kg(price)
         else:
             weight_match = re.search(
                 r"/\s*(\d+(?:\.\d+)?)\s*(kg|g)\b", box_text, re.IGNORECASE,
@@ -170,9 +171,11 @@ def scrape(url):
                 if weight_match.group(2).lower() == "g":
                     weight /= 1000
                 if weight > 0:
-                    per_kg_price = f"AED {price / weight:.2f}/kg"
+                    per_kg_price = format_per_kg(price / weight)
             if per_kg_price is None:
-                per_kg_price = f"AED {price:.2f}/kg"
+                # Price but no detectable weight: report it as per-kg
+                # (assumes ~1kg pack) so every row stays comparable.
+                per_kg_price = format_per_kg(price)
 
     if per_kg_price is None:
         print(f"[unioncoop] Price Error: no price found at {url}")

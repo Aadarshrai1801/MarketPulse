@@ -201,6 +201,11 @@ Before pointing a real domain at this app:
   product takes a couple of seconds, and jobs fan out over a small thread
   pool (`FETCH_WORKERS`, default 5) — "all"/"all" (5 × 8 = 40 lookups)
   finishes in well under a minute.
+- Every successful row stores its price normalized to `AED X.XX/kg`
+  (see `compute_per_kg` in `scraper/utils.py`): the retailer's own
+  per-kg figure when shown, otherwise price ÷ pack weight. When a page
+  shows a price but no parseable weight, the price itself is reported as
+  the per-kg value (≈1kg-pack assumption) so no cell stays blank.
 - Barakat, Kibsons, and Union Coop selectors in `scraper/config.py` are
   marked as best-effort guesses — if a lookup fails or grabs the wrong
   product for those three, inspect the live search results page and

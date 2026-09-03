@@ -19,9 +19,10 @@ from .config import SITE_SEARCH_CONFIG
 from .utils import (
     fetch_fast,
     fetch_with_fallback,
+    iter_links,
     css_first_text,
     css_all_text,
-    _page_text,
+    compute_per_kg,
 )
 
 SITE = "kibsons"
@@ -252,16 +253,9 @@ def scrape(url):
             weight_kg, _ = parse_weight_to_kg(catalog_record.get("stockShortDetail") or "")
 
     # ---------------------------------------------------------
-    # PER KG PRICE
+    # PER KG PRICE (always canonical "AED X.XX/kg" when a price exists)
     # ---------------------------------------------------------
-    per_kg_price = None
-    if weight_kg is not None and price_value is not None and weight_kg > 0:
-        per_kg = price_value / weight_kg
-        per_kg_price = f"AED {per_kg:.2f}/kg"
-    elif price_value is not None and weight_kg is None:
-        # API record without a parseable pack size - surface the raw price
-        # rather than nothing.
-        per_kg_price = f"AED {price_value:.2f}"
+    per_kg_price = compute_per_kg(price_value, weight_kg)
 
     return {
         "product": title,

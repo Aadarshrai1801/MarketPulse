@@ -387,3 +387,34 @@ def parse_price_value(price_text):
         return None
     match = re.search(r'\d+(?:\.\d+)?', price_text)
     return float(match.group()) if match else None
+
+
+def format_per_kg(value):
+    """Single canonical price format used everywhere: 'AED 12.95/kg'."""
+    return f"AED {float(value):.2f}/kg"
+
+
+def compute_per_kg(price_value, weight_kg):
+    """Normalize any (price, pack-weight) pair into the canonical per-kg string.
+
+    - weight_kg > 0 -> true per-kg value (price / weight).
+    - weight unknown -> the price itself, formatted as /kg. This assumes a
+      ~1kg pack and is only approximate, but keeps the invariant the
+      dashboard relies on: every successful row carries a per-kg price.
+      (Liquids use the same 1L ~= 1kg approximation as Carrefour's pack
+      parser, so volume units also land here instead of a separate /L.)
+    - price_value None -> None (no price found at all).
+    """
+    if price_value is None:
+        return None
+    try:
+        price_value = float(price_value)
+    except (TypeError, ValueError):
+        return None
+    try:
+        weight_kg = float(weight_kg) if weight_kg else 0.0
+    except (TypeError, ValueError):
+        weight_kg = 0.0
+    if weight_kg > 0:
+        return format_per_kg(price_value / weight_kg)
+    return format_per_kg(price_value)

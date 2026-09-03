@@ -21,6 +21,7 @@ from .utils import (
     _page_text,
     parse_weight_to_kg,
     parse_price_value,
+    compute_per_kg,
 )
 
 SITE = "lulu"
@@ -109,6 +110,42 @@ def scrape(url):
             except ValueError:
                 pass
 
+    if price_value is None or not title:
+        # JSON-LD fallback: Lulu always embeds Product/Offer schema with
+        # the canonical price (and name), even when the visible price
+        # widget doesn't render statically.
+        try:
+            import json as _json
+
+            raw_html = bytes(getattr(page, "body", b"") or b"").decode("utf-8", "ignore")
+            for _m in re.finditer(
+                r'<script type="application/ld\+json">(.*?)</script>', raw_html, re.DOTALL
+            ):
+                try:
+                    _ld = _json.loads(_m.group(1))
+                except Exception:
+                    continue
+                _items = _ld if isinstance(_ld, list) else [_ld]
+                for _item in _items:
+                    if not isinstance(_item, dict):
+                        continue
+                    if price_value is None:
+                        _offer = _item.get("offers") or {}
+                        if isinstance(_offer, list):
+                            _offer = _offer[0] if _offer else {}
+                        if isinstance(_offer, dict):
+                            try:
+                                _pv = float(_offer.get("price") or 0)
+                                if _pv > 0:
+                                    price_value = _pv
+                                    price = f"AED {_pv:.2f}"
+                            except (TypeError, ValueError):
+                                pass
+                    if not title and _item.get("@type") == "Product" and _item.get("name"):
+                        title = str(_item["name"]).strip()
+        except Exception:
+            pass
+
     # UNIT / PACK SIZE + PER-KG PRICE (LuLu shows size in title, not AED/kg)
     value, unit = parse_weight_to_kg(title or "")
     if value is None:
@@ -116,12 +153,7 @@ def scrape(url):
     if price_value is None:
         price_value = parse_price_value(price)
 
-    per_kg_price = None
-    if value and price_value is not None and value > 0:
-        if unit == "kg":
-            per_kg_price = f"AED {price_value / value:.2f}/kg"
-        elif unit == "l":
-            per_kg_price = f"AED {price_value / value:.2f}/L"
+    per_kg_price = compute_per_kg(price_value, value)
 
     # COUNTRY OF ORIGIN
     country_of_origin = "United Arab Emirates"

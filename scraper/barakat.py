@@ -13,7 +13,13 @@ import time
 from datetime import datetime
 
 from .config import SITE_SEARCH_CONFIG
-from .utils import fetch_with_fallback, css_first_text, css_all_text, parse_weight_to_kg
+from .utils import (
+    fetch_with_fallback,
+    css_first_text,
+    css_all_text,
+    parse_weight_to_kg,
+    compute_per_kg,
+)
 
 SITE = "barakat"
 
@@ -275,14 +281,9 @@ def scrape(url):
             break
 
     # ---------------------------------------------------------
-    # PER KG PRICE
+    # PER KG PRICE (always canonical "AED X.XX/kg" when a price exists)
     # ---------------------------------------------------------
-    per_kg_price = None
-    if price_value is not None and weight_kg is not None and weight_kg > 0:
-        perkg = price_value / weight_kg
-        per_kg_price = f"AED {perkg:.2f}/kg"
-    elif price_value is not None:
-        per_kg_price = f"AED {price_value:.2f}"
+    per_kg_price = compute_per_kg(price_value, weight_kg)
 
     # ---------------------------------------------------------
     # COUNTRY OF ORIGIN

@@ -18,6 +18,8 @@ from .utils import (
     css_first_text,
     css_all_text,
     _page_text,
+    parse_price_value,
+    format_per_kg,
 )
 
 SITE = "carrefour"
@@ -129,15 +131,18 @@ def scrape(url):
         main_price = prices_found[0] if prices_found else None
 
     # ---- per-kg price: prefer Carrefour's own explicit value ----
+    # Every branch below lands in the canonical "AED X.XX/kg" format
+    # (format_per_kg); per-gram/per-ml figures are scaled x1000, and
+    # volumes use the same 1L ~= 1kg approximation as _parse_pack_size_to_kg.
     per_kg_price = None
     for candidate in css_all_text(page, "div.text-gray-600"):
         match = re.search(r'AED\s?([\d]+\.\d{2})\s?/\s?(kg|g|l|ml)', candidate, re.IGNORECASE)
         if match:
             value, unit = float(match.group(1)), match.group(2).lower()
             if unit in ('kg', 'l'):
-                per_kg_price = f"AED {value:.2f}"
+                per_kg_price = format_per_kg(value)
             elif unit in ('g', 'ml'):
-                per_kg_price = f"AED {value * 1000:.2f}"
+                per_kg_price = format_per_kg(value * 1000)
             else:
                 per_kg_price = main_price
             break
@@ -146,9 +151,9 @@ def scrape(url):
         if explicit_match:
             value, unit = float(explicit_match.group(1)), explicit_match.group(2).lower()
             if unit in ('kg', 'l'):
-                per_kg_price = f"AED {value:.2f}"
+                per_kg_price = format_per_kg(value)
             elif unit in ('g', 'ml'):
-                per_kg_price = f"AED {value * 1000:.2f}"
+                per_kg_price = format_per_kg(value * 1000)
 
     # ---- pack size fallback (only needed if no explicit per-kg price) ----
     pack_size_raw = None
@@ -172,9 +177,12 @@ def scrape(url):
         pack_size_kg = _parse_pack_size_to_kg(pack_size_raw) if pack_size_raw else None
         price_value_match = re.search(r'[\d]+\.\d{2}', main_price) if main_price else None
         if price_value_match and pack_size_kg and pack_size_kg > 0:
-            per_kg_price = f"AED {float(price_value_match.group()) / pack_size_kg:.2f}"
-        elif not per_kg_price:
-            per_kg_price = main_price
+            per_kg_price = format_per_kg(float(price_value_match.group()) / pack_size_kg)
+        if not per_kg_price and main_price:
+            # No pack size anywhere: fall back to the item price, formatted
+            # as per-kg (assumes ~1kg pack) so every row stays comparable.
+            _fallback = parse_price_value(main_price)
+            per_kg_price = format_per_kg(_fallback) if _fallback is not None else None
 
     # ---- country of origin ----
     country_of_origin = None

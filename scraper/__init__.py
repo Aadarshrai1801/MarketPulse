@@ -22,7 +22,7 @@ Price storage lives in MongoDB (see mongo_store.py / db.py).
 
 from .config import SITE_SEARCH_CONFIG
 from .mongo_store import save_price_record, get_price_history, save_latest_fetch, get_latest_fetch
-from .utils import parse_weight_to_kg, parse_price_value
+from .utils import parse_weight_to_kg, parse_price_value, format_per_kg, compute_per_kg
 
 from . import carrefour, lulu, barakat, kibsons, unioncoop
 
@@ -73,4 +73,6 @@ __all__ = [
     "get_latest_fetch",
     "parse_weight_to_kg",
     "parse_price_value",
+    "format_per_kg",
+    "compute_per_kg",
 ]
