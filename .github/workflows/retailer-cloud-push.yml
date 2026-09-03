@@ -68,29 +68,27 @@ jobs:
 
       # Map the cron entry that fired to one retailer. GitHub doesn't pass
       # which cron hit in context, so derive it from the current UTC hour
-      # (each schedule fires on a unique hour:minute pair).
+      # (each schedule fires on a unique hour:minute pair). Runs on bash
+      # (ubuntu-latest default shell) - keep this POSIX, not PowerShell.
       - name: Pick retailer from current UTC schedule slot
         id: pick
         run: |
-          $hour = (Get-Date -Format "HH")
-          $min  = (Get-Date -Format "mm")
-          $r = "all"
-          if     ($hour -eq "01" -and $min -lt "30") { $r = "carrefour" }
-          elseif ($hour -eq "01")                  { $r = "lulu" }
-          elseif ($hour -eq "02" -and $min -lt "30") { $r = "barakat" }
-          elseif ($hour -eq "02")                  { $r = "kibsons" }
-          elseif ($hour -eq "03")                  { $r = "unioncoop" }
+          hour=$(date -u +"%H")
+          min=$(date -u +"%M")
+          r="all"
+          if [ "$hour" = "01" ]; then
+            if [ "$min" -lt "30" ]; then r="carrefour"; else r="lulu"; fi
+          elif [ "$hour" = "02" ]; then
+            if [ "$min" -lt "30" ]; then r="barakat"; else r="kibsons"; fi
+          elif [ "$hour" = "03" ]; then
+            r="unioncoop"
+          fi
           # Manual dispatch override
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") { $r = "${{ inputs.retailer }}" }
-          echo "retailer=$r" | Out-File -Encoding utf8 $env:GITHUB_OUTPUT -Append
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            r="${{ inputs.retailer }}"
+          fi
+          echo "retailer=$r" >> "$GITHUB_OUTPUT"
           echo "Selected retailer: $r"
-
-      - name: Skip Unioncoop if the disabled flag is set
-        run: |
-          if ( "${{ steps.pick.outputs.retailer }}" -eq "unioncoop" -or "${{ steps.pick.outputs.retailer }}" -eq "all" ) {
-            echo "Note: unioncoop rows from Render are blocked (DISABLED_RETAILERS=unioncoop);" `
-                 "this cloud job still writes the same DB so the dashboard shows them."
-          }
 
       - name: Scrape and push to MongoDB
         env:
