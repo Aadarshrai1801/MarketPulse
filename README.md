@@ -60,34 +60,26 @@ editor / admin), and optional "Continue with Google" sign-in.
   a synthesized sheet.
 - `scripts/migrate_to_mongo.py` — one-time script that copies your
   existing `users.db` and `products.xlsx` into MongoDB. Safe to re-run.
-- `scripts/push_retailer.py` — scrape one retailer and push the rows
-  into MongoDB (`python scripts/push_retailer.py --retailer unioncoop`;
-  exits nonzero unless every row succeeds). Used two ways: manually on
-  a machine whose egress a site allows, and — for any retailer Actions
-  can reach — by the `Retailer cloud push` GitHub Action
-  (`.github/workflows/retailer-cloud-push.yml`, staggered 01:00–03:00
-  UTC). Staggered schedule:
-
-  | UTC time (GST) | Retailer |
-  |---|---|
-  | 01:00 (05:00) | carrefour |
-  | 01:30 (05:30) | lulu |
-  | 02:00 (06:00) | barakat |
-  | 02:30 (06:30) | kibsons |
-  | 03:00 (07:00) | unioncoop |
-
-  Even with all 5 enabled this is well inside the 2,000 min/month free
-  tier. Needs `MONGODB_URI` / `MONGO_DB_NAME` repo secrets matching
-  Render's values. Manual "Run workflow" with a retailer dropdown also
-  supported for ad-hoc pushes.
+- `scripts/push_retailer.py` — scrape retailers and push the rows
+  into MongoDB. `--retailer` accepts one id, a comma-separated list,
+  `green` (the daily cloud set: carrefour/lulu/barakat/kibsons —
+  everything verified reachable from Actions egress), or `all`.
+  Exits 0 unless a lookup FAILs; known stockouts
+  (`catalog.RETAILER_PRODUCT_SKIPS`, e.g. Barakat navel oranges,
+  delisted site-wide) log as SKIP and don't fail the run. The
+  `Retailer cloud push` GitHub Action
+  (`.github/workflows/retailer-cloud-push.yml`) runs `--retailer green`
+  daily at 01:00 UTC (05:00 GST) — one ~5 min run, ~1–2% of the free
+  Actions allowance. Manual "Run workflow" offers the same choices for
+  ad-hoc pushes. Needs `MONGODB_URI` / `MONGO_DB_NAME` repo secrets
+  matching Render's values.
 - `.github/workflows/retailer-egress-probe.yml` — one-shot probe of
   every retailer from a fresh Actions runner; the log's HTTP codes tell
   you which retailers are cloud-friendly. Run this once before relying
-  on the cloud push.
+  on the cloud push. Results 2026-09-03: carrefour/lulu/barakat/kibsons
+  200, unioncoop 405 (blocked on Render AND Actions egress).
 - `.github/workflows/unioncoop-egress-probe.yml` — original narrower
   Unioncoop-only probe (kept for reference).
-- `.github/workflows/unioncoop-egress-probe.yml` — original narrower
-  probe (Unioncoop only).
 - `app.py` — Flask backend (routes only):
   - `GET /api/meta` — retailer + product lists for the dropdowns.
   - `POST /api/fetch` — **synchronous.** Runs the scraper for the

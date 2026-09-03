@@ -1,24 +1,23 @@
-# Daily cloud push for every retailer GitHub Actions (Azure) can reach.
+# Daily cloud push for the "green" retailer set (see GREEN_RETAILERS in
+# scripts/push_retailer.py): every retailer GitHub Actions (Azure) egress
+# can reach, verified by retailer-egress-probe.yml.
 #
-# Why this exists: an IP/geo can block a single hosting provider (Render
-# gets 405 on Unioncoop) while allowing another (Azure via Actions
-# returns 200). Verified by retailer-egress-probe.yml. The hosted app
-# uses DISABLED_RETAILERS=unioncoop to skip a blocked retailer; this
-# workflow runs from Azure and writes the same records (price_history +
-# latest_fetch) into the same MongoDB - the dashboard reads from Mongo,
-# so every retailer that's "Azure-OK" is fully cloud-only.
+# Why this exists: an IP/geo edge can block one hosting provider (Render
+# gets 405 on Unioncoop) while allowing another (Azure returns 200 for
+# carrefour/lulu/barakat/kibsons). The hosted app skips what it can't
+# reach (DISABLED_RETAILERS); this workflow writes the same records
+# (price_history + latest_fetch) into the same MongoDB - the dashboard
+# reads from Mongo, so coverage is complete without proxies or a local PC.
 #
-# Per-retailer matrix: edit SCHEDULE below. CRON follows GitHub syntax
-# (UTC). Times chosen to spread load: carrefour/lulu morning, barakat/
-# kibsons midday, unioncoop evening. Stagger by 30 min so the runs don't
-# all hammer Mongo at the same second.
+# Known stockouts (catalog.RETAILER_PRODUCT_SKIPS, e.g. Barakat navel
+# oranges, delisted site-wide) log as SKIP, not FAIL, so the run stays
+# green while the gap stays visible in its log.
 #
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
 #   MONGODB_URI   - same Atlas connection string as Render
 #   MONGO_DB_NAME - same database name as Render (must match!)
 #
-# Free-tier cost: ~3-5 min per run, well inside the 2,000 min/month limit
-# even if all five run daily.
+# Free-tier cost: one ~5 min run/day, ~1-2% of the 2,000 min/month allowance.
 
 name: Retailer cloud push
 
@@ -26,25 +25,23 @@ on:
   workflow_dispatch:
     inputs:
       retailer:
-        description: "Retailer to push (or 'all')"
+        description: "Retailer set ('green' = daily cloud set)"
         required: true
         type: choice
         options:
+          - green
           - all
           - carrefour
           - lulu
           - barakat
           - kibsons
           - unioncoop
-        default: all
+        default: green
   schedule:
-    - cron: "0 1 * * *"   # 01:00 UTC = 05:00 GST - carrefour
-    - cron: "30 1 * * *"  # 01:30 UTC = 05:30 GST - lulu
-    - cron: "0 2 * * *"   # 02:00 UTC = 06:00 GST - barakat
-    - cron: "30 2 * * *"  # 02:30 UTC = 06:30 GST - kibsons
-    - cron: "0 3 * * *"   # 03:00 UTC = 07:00 GST - unioncoop
+    # 01:00 UTC = 05:00 GST (UAE) daily
+    - cron: "0 1 * * *"
 
-# One run at a time - the matrix already staggers; never overlap.
+# One run at a time - never overlap pushes into the same collections.
 concurrency:
   group: retailer-cloud-push
   cancel-in-progress: false
@@ -66,29 +63,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Map the cron entry that fired to one retailer. GitHub doesn't pass
-      # which cron hit in context, so derive it from the current UTC hour
-      # (each schedule fires on a unique hour:minute pair). Runs on bash
-      # (ubuntu-latest default shell) - keep this POSIX, not PowerShell.
-      - name: Pick retailer from current UTC schedule slot
+      # Scheduled ticks push the green set; manual dispatch uses the dropdown.
+      - name: Pick retailer set
         id: pick
         run: |
-          hour=$(date -u +"%H")
-          min=$(date -u +"%M")
-          r="all"
-          if [ "$hour" = "01" ]; then
-            if [ "$min" -lt "30" ]; then r="carrefour"; else r="lulu"; fi
-          elif [ "$hour" = "02" ]; then
-            if [ "$min" -lt "30" ]; then r="barakat"; else r="kibsons"; fi
-          elif [ "$hour" = "03" ]; then
-            r="unioncoop"
-          fi
-          # Manual dispatch override
+          r="green"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             r="${{ inputs.retailer }}"
           fi
           echo "retailer=$r" >> "$GITHUB_OUTPUT"
-          echo "Selected retailer: $r"
+          echo "Selected retailer set: $r"
 
       - name: Scrape and push to MongoDB
         env:

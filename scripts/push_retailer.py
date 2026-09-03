@@ -1,24 +1,25 @@
-"""Push fresh prices for one retailer from THIS machine into MongoDB.
+"""Scrape one or more retailers from THIS machine and push rows to MongoDB.
 
-The use case is an IP-blocked retailer: Unioncoop's Fastly edge 405s every
-request from hosting datacenter IPs (Render), but answers a residential IP
-fine. So the hosted app sets DISABLED_RETAILERS=unioncoop and never attempts
-it there - instead, this script runs on a machine whose egress is allowed
-(e.g. your home PC) and upserts the exact same records (price_history +
-latest_fetch) the hosted fetch would have written. The dashboard reads from
-MongoDB, so Unioncoop rows show up there with no code or proxy changes.
+Primary use: scheduled cloud pushes (see .github/workflows/retailer-cloud-push.yml)
+from an egress network each site allows. Also handy manually on any machine:
 
-Usage (from the repo root, home PC):
     python scripts/push_retailer.py --retailer unioncoop
-    python scripts/push_retailer.py --retailer unioncoop --product tomato
+    python scripts/push_retailer.py --retailer carrefour,lulu
+    python scripts/push_retailer.py --retailer green     # daily cloud set
+    python scripts/push_retailer.py --retailer all       # everything
 
-Schedule it with Windows Task Scheduler, e.g. daily at 08:00:
-    schtasks /create /tn "MarketPulse Unioncoop Push" /sc daily /st 08:00 ^
-      /tr "'C:\\Users\\Aadarsh\\miniconda3\\envs\\marketpulse\\python.exe' ^
-           'C:\\Users\\Aadarsh\\Desktop\\MarketPulse 2.0\\scripts\\push_retailer.py --retailer unioncoop'"
+Retailer sets:
+  all    - every configured retailer (local/full runs).
+  green  - the daily cloud set: retailers verified reachable from GitHub
+           Actions egress (see .github/workflows/retailer-egress-probe.yml).
+           Edit GREEN_RETAILERS below when probe results change.
+
+Known stockouts (catalog.RETAILER_PRODUCT_SKIPS) are logged as SKIP, not
+FAIL - a delisted product must not turn every scheduled run red.
 
 Requires MONGODB_URI in the environment or a local .env (same as app.py).
-Exits 0 only when every lookup succeeds (so the scheduler flags partial runs).
+Exits 0 when every attempted lookup succeeds (skips don't count against it),
+1 on any failure, 2 on bad arguments - so a scheduler flags real problems.
 """
 import argparse
 import os
@@ -26,30 +27,64 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from catalog import RETAILER_PRODUCT_SKIPS
 from services.fetch import resolve_retailers, resolve_products, scrape_one
+
+# Retailers the daily cloud job covers: reachable from Actions egress AND
+# cheap enough to run every day. Unioncoop is excluded (Fastly 405s both
+# Render AND Actions egress - residential IPs only). Update when the
+# retailer-egress-probe results change.
+GREEN_RETAILERS = ("carrefour", "lulu", "barakat", "kibsons")
+
+
+def resolve_retailer_arg(value):
+    """Expand 'all' / 'green' / comma-separated ids, preserving order."""
+    value = (value or "all").strip().lower()
+    if value == "all":
+        return resolve_retailers("all")
+    if value == "green":
+        retailers = []
+        for retailer_id in GREEN_RETAILERS:
+            retailers.extend(resolve_retailers(retailer_id))
+        return retailers
+    retailers = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        found = resolve_retailers(part)
+        if not found:
+            return []
+        retailers.extend(r for r in found if r not in retailers)
+    return retailers
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Scrape one retailer locally and push to MongoDB.")
-    parser.add_argument("--retailer", default="unioncoop",
-                        help="Retailer id (default: unioncoop).")
+    parser = argparse.ArgumentParser(description="Scrape retailers and push rows to MongoDB.")
+    parser.add_argument("--retailer", default="green",
+                        help="Retailer id, comma-separated ids, 'green' (daily cloud set), or 'all'.")
     parser.add_argument("--product", default="all",
                         help="Product id or 'all' (default: all).")
     args = parser.parse_args()
 
-    retailers = resolve_retailers((args.retailer or "all").strip().lower())
+    retailers = resolve_retailer_arg(args.retailer)
     products = resolve_products((args.product or "all").strip().lower())
 
     if not retailers:
-        print(f"Unknown or disabled retailer '{args.retailer}'.")
+        print(f"Unknown or disabled retailer selection '{args.retailer}'.")
         return 2
     if not products:
         print(f"Unknown product '{args.product}'.")
         return 2
 
-    ok = failed = 0
+    ok = skipped = failed = 0
     for product in products:
         for retailer in retailers:
+            if (retailer, product["id"]) in RETAILER_PRODUCT_SKIPS:
+                skipped += 1
+                print(f"SKIP {product['id']} @ {retailer}: known stockout "
+                      f"(see catalog.RETAILER_PRODUCT_SKIPS).")
+                continue
             result = scrape_one(product, retailer)
             if result.get("ok"):
                 ok += 1
@@ -60,7 +95,8 @@ def main():
                 failed += 1
                 print(f"FAIL {product['id']} @ {retailer}: {result.get('error')}")
 
-    print(f"\n{ok}/{ok + failed} rows pushed to MongoDB.")
+    total = ok + skipped + failed
+    print(f"\n{ok} ok, {skipped} skipped, {failed} failed / {total} attempted.")
     return 0 if failed == 0 else 1
 
 

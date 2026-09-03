@@ -209,3 +209,20 @@ def delete_custom_product(product_id):
     db = get_db()
     result = db.products.delete_one({"id": product_id, "custom": True})
     return result.deleted_count > 0
+
+
+# ------------------------------------------------------------------
+# Known stockouts: (retailer, product_id) pairs the site has delisted.
+# scripts/push_retailer.py logs these as SKIP (not FAIL) so a scheduled
+# run stays green while the gap stays visible in its log. The scraper
+# itself still attempts them (an interactive fetch reports the honest
+# failure) - the skip applies to scheduled pushes only, where a daily
+# red run over a known-delisted product would just train everyone to
+# ignore failures. Remove the entry when the site relists the product.
+# ------------------------------------------------------------------
+RETAILER_PRODUCT_SKIPS = {
+    # Barakat delisted ALL navel oranges site-wide (verified 2026-09-03:
+    # all 7 navel URLs 404 from residential IP too, while their stale
+    # sitemap still lists them).
+    ("barakat", "orange_navel"),
+}
