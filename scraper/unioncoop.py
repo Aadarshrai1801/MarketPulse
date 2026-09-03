@@ -1,10 +1,15 @@
 """
-Union Coop via Scrapling - fast HTTP first, StealthyFetcher only if needed.
+Union Coop via Scrapling - fast HTTP first, stealthy browser if needed,
+verified product-URL fallback for hosted datacenter IPs.
 
 The search listing is JS-rendered (static fetch returns the page shell with
 no product links), so find_url() retries via the stealthy browser when the
-fast pass yields nothing. Product pages themselves are server-rendered
-(span.base, data-price-amount), so scrape() stays on plain HTTP.
+fast pass yields nothing. Unioncoop's WAF also rejects search requests from
+hosting datacenter IPs (HTTP 405 on Render) - for that case a table of
+verified product URLs (checked live, resolved per product) is used, so the
+hosted run succeeds with zero browser. Product pages themselves are
+server-rendered (span.base, data-price-amount), so scrape() stays on plain
+HTTP.
 """
 
 import re
@@ -12,8 +17,8 @@ from datetime import datetime
 
 from .config import SITE_SEARCH_CONFIG
 from .utils import (
+    fetch_fast,
     fetch_with_fallback,
-    fetch_stealthy,
     iter_links,
     rank_links,
     css_first_text,
@@ -22,6 +27,29 @@ from .utils import (
 )
 
 SITE = "unioncoop"
+
+# Verified product URLs (checked live 2026-09-03). Used ONLY when the live
+# search is unreachable - Unioncoop's WAF answers search requests from
+# hosting datacenter IPs (Render) with HTTP 405. Each URL is re-verified
+# live (status 200 + title + price) before being returned, so a renamed /
+# delisted product fails loudly instead of recording a stale price.
+# Keys are lowercase aliases; lookup matches on token subsets, so
+# "Watermelon saudi" and "navel orange" resolve correctly.
+KNOWN_URLS = {
+    "garlic": "https://www.unioncoop.ae/garlic-loose-china-462760.html",
+    "cucumber": "https://www.unioncoop.ae/cucumber-loose-uae-463632.html",
+    "potato": "https://www.unioncoop.ae/potato-1700602554-mdawmdawmtm4mziwmq-mdawmdawmtm4mziwmv8xnzawnjayntu0.html",
+    "potatoes": "https://www.unioncoop.ae/potato-1700602554-mdawmdawmtm4mziwmq-mdawmdawmtm4mziwmv8xnzawnjayntu0.html",
+    "red onion": "https://www.unioncoop.ae/onion-red-organic-1728425908-mdawmdawmtqxndy4na-mdawmdawmtqxndy4nf8xnzi4ndi1ota4.html",
+    "onion red": "https://www.unioncoop.ae/onion-red-organic-1728425908-mdawmdawmtqxndy4na-mdawmdawmtqxndy4nf8xnzi4ndi1ota4.html",
+    "tomato": "https://www.unioncoop.ae/tomato-2405057.html",
+    "valencia orange": "https://www.unioncoop.ae/armela-orange-val-1kg-1765580684-mdy2otu2oda4ote3mq-mdy2otu2oda4ote3mv8xnzy1ntgwnjg0.html",
+    "orange valencia": "https://www.unioncoop.ae/armela-orange-val-1kg-1765580684-mdy2otu2oda4ote3mq-mdy2otu2oda4ote3mv8xnzy1ntgwnjg0.html",
+    "navel orange": "https://www.unioncoop.ae/orange-naval-cambria-1755379961-mdywnze-mdywnzffmtc1ntm3otk2mq.html",
+    "orange navel": "https://www.unioncoop.ae/orange-naval-cambria-1755379961-mdywnze-mdywnzffmtc1ntm3otk2mq.html",
+    "orange naval": "https://www.unioncoop.ae/orange-naval-cambria-1755379961-mdywnze-mdywnzffmtc1ntm3otk2mq.html",
+    "watermelon": "https://www.unioncoop.ae/water-melon-2373097.html",
+}
 
 KNOWN_COUNTRIES = [
     "India", "China", "Pakistan", "Egypt", "Iran", "Turkey", "Jordan", "Oman", "UAE",
@@ -74,23 +102,80 @@ def find_url(product_name):
     query = product_name.strip().replace(" ", "%20")
     search_url = config["search_url"].format(query=query)
 
-    page = fetch_with_fallback(search_url, mode=mode)
-    href, first_href = _collect_hrefs(page, config, product_name)
-
-    if href is None and first_href is None and mode != "fast":
-        # Static fetch returned the JS shell with no product links - render
-        # the listing once via the stealthy browser (only path that uses it
-        # for this retailer). On slim hosts without browsers this raises a
-        # clear RuntimeError, surfaced per-row by app.py.
-        page = fetch_stealthy(search_url)
+    # Stage 1+2: live search - fast HTTP, then the stealthy browser on
+    # block/JS-shell (fetch_with_fallback handles both; on a slim host
+    # without browsers it re-raises the fast error, e.g. HTTP 405).
+    search_error = None
+    try:
+        page = fetch_with_fallback(search_url, mode=mode, wait_selector="a.result")
+    except Exception as e:
+        page = None
+        search_error = e
+    if page is not None:
         href, first_href = _collect_hrefs(page, config, product_name)
+        found = href or first_href
+        if found:
+            return _resolve(found, config["base_url"])
 
-    href = href or first_href
-    if not href:
-        print(f"[unioncoop] 0 results for '{product_name}' - url: {search_url}")
-        raise ValueError(f"Couldn't find '{product_name}' on {SITE}.")
+    # Stage 3: verified known-URL fallback (no browser needed) - this is
+    # what saves the hosted run when the WAF blocks datacenter search.
+    known = _known_url_for(product_name)
+    if known and _verify_known_url(known):
+        return known
 
-    return _resolve(href, config["base_url"])
+    if search_error is not None:
+        raise RuntimeError(
+            f"Unioncoop search blocked ({search_error}); "
+            f"and no verified product URL for '{product_name}'."
+        ) from None
+    print(f"[unioncoop] 0 results for '{product_name}' - url: {search_url}")
+    raise ValueError(f"Couldn't find '{product_name}' on {SITE}.")
+
+
+def _norm_tokens(text):
+    return [t for t in re.split(r"[^a-z0-9]+", (text or "").lower()) if t]
+
+
+def _known_url_for(product_name):
+    """Best KNOWN_URLS entry whose alias tokens are all in the query
+    (so 'Watermelon saudi' -> 'watermelon'); falls back to best token
+    overlap. Returns None when nothing shares a token."""
+    want = set(_norm_tokens(product_name))
+    if not want:
+        return None
+    best, best_key = None, None
+    for alias, url in KNOWN_URLS.items():
+        alias_tokens = set(_norm_tokens(alias))
+        if alias_tokens <= want:
+            if best is None or len(alias_tokens) > len(_norm_tokens(best_key)):
+                best, best_key = url, alias
+    if best is not None:
+        return best
+    for alias, url in KNOWN_URLS.items():
+        if want & set(_norm_tokens(alias)):
+            return url
+    return None
+
+
+def _verify_known_url(url):
+    """Live check: status 200 + a title + a price on the product page."""
+    try:
+        page = fetch_fast(url, timeout=30)
+    except Exception:
+        return False
+    try:
+        title = page.css("span.base::text").get()  # type: ignore[attr-defined]
+        if not title or not str(title).strip():
+            title = page.css("h1::text").get()  # type: ignore[attr-defined]
+        if not title or not str(title).strip():
+            return False
+        amount = page.css("[data-price-amount]::attr(data-price-amount)").get()  # type: ignore[attr-defined]
+        if amount and float(str(amount).strip()) > 0:
+            return True
+        body = _page_text(page, limit=20000)
+        return bool(re.search(r"\d+\.\d{2}", body))
+    except Exception:
+        return False
 
 
 def scrape(url):

@@ -2,10 +2,13 @@
 Kibsons via its product-catalog JSON API + static product pages - no browser.
 
 Search pages are JS-rendered, but the frontend's own catalog endpoint
-(POST apinode.kibsons.com/product/productsv26) returns all ~2000 products
-with name/price/pack-size/origin, so find_url() scores that locally instead
-of scraping the search page. Product pages themselves are server-rendered,
-so scrape() stays plain HTTP. fetch_mode is "fast": a browser is never used.
+(POST apinode.kibsons.com/product/productsv26) returns most products with
+name/price/pack-size/origin, so find_url() scores that locally instead of
+scraping the search page. Listings the API doesn't carry (navel/valencia
+oranges) resolve via verified KNOWN_URLS; the stealthy browser is a last
+resort only. Product pages themselves are server-rendered, so scrape()
+stays plain HTTP. fetch_mode is "fast": the catalog + known-URL paths
+never use a browser, which is what serves the hosted run.
 
 The 14MB catalog is fetched at most once per CATALOG_TTL_SECONDS and shared
 by every lookup, so an all-products job costs one heavy request, not 40.
@@ -18,8 +21,10 @@ from datetime import datetime
 from .config import SITE_SEARCH_CONFIG
 from .utils import (
     fetch_fast,
+    fetch_stealthy,
     fetch_with_fallback,
     iter_links,
+    rank_links,
     css_first_text,
     css_all_text,
     compute_per_kg,
@@ -27,10 +32,34 @@ from .utils import (
 
 SITE = "kibsons"
 
+# Listings the catalog API doesn't carry (verified live 2026-09-03: zero
+# hits for "navel"/"valencia" across all 10k catalog records, while the
+# website lists both). Resolved before the stealthy fallback so the hosted
+# run (no browsers on Render free) succeeds. Each URL is re-verified live
+# via _verify_url before being returned.
+KNOWN_URLS = {
+    "orange navel": "https://www.kibsons.com/en/product/fruits/citrus/kibsons-navel-oranges-oranazakbpacs1",
+    "navel orange": "https://www.kibsons.com/en/product/fruits/citrus/kibsons-navel-oranges-oranazakbpacs1",
+    "orange valencia": "https://www.kibsons.com/en/product/fruits/citrus/kibsons-valencia-oranges-oravazakbpacs1",
+    "valencia orange": "https://www.kibsons.com/en/product/fruits/citrus/kibsons-valencia-oranges-oravazakbpacs1",
+}
+
 CATALOG_URL = "https://apinode.kibsons.com/product/productsv26"
 CATALOG_TTL_SECONDS = 30 * 60
+CATALOG_MAX_PAGES = 6
+
+# Only the fields find_url()/scrape() actually read - the raw records are
+# huge and 5 pages x 2000 records would otherwise eat ~150MB on free Render.
+_CATALOG_FIELDS = (
+    "stockDesc", "stockRate", "stockShortDetail", "stockUnits", "stockOrigin",
+    "stockCode", "brandDesc", "productkey", "sayt_stockdesc", "sayt_productdesc",
+)
 
 _catalog_cache = {"at": 0.0, "products": []}
+
+
+def _project_record(record):
+    return {key: record.get(key) for key in _CATALOG_FIELDS}
 
 
 def _get_catalog():
@@ -39,22 +68,41 @@ def _get_catalog():
         return _catalog_cache["products"]
     from scrapling.fetchers import Fetcher
 
-    page = Fetcher.post(
-        CATALOG_URL,
-        json={"search": "x"},
-        impersonate="chrome",
-        stealthy_headers=True,
-        timeout=60,
-    )
     import json as _json
 
-    data = _json.loads(bytes(page.body or b"").decode("utf-8", "ignore"))
-    products = (data.get("data") or {}).get("products") or []
-    if not products:
+    merged = []
+    seen_codes = set()
+    total = None
+    for page_no in range(1, CATALOG_MAX_PAGES + 1):
+        page = Fetcher.post(
+            CATALOG_URL,
+            json={"page": page_no} if page_no > 1 else {"search": "x"},
+            impersonate="chrome",
+            stealthy_headers=True,
+            timeout=60,
+        )
+        data = _json.loads(bytes(page.body or b"").decode("utf-8", "ignore"))
+        node = data.get("data") or {}
+        if total is None:
+            try:
+                total = int(node.get("totalcount") or 0)
+            except (TypeError, ValueError):
+                total = 0
+        batch = node.get("products") or []
+        if not batch:
+            break
+        for record in batch:
+            code = (record.get("stockCode") or "").upper()
+            if code and code not in seen_codes:
+                seen_codes.add(code)
+                merged.append(_project_record(record))
+        if total and len(merged) >= total:
+            break
+    if not merged:
         raise ValueError("Kibsons catalog API returned no products.")
     _catalog_cache["at"] = now
-    _catalog_cache["products"] = products
-    return products
+    _catalog_cache["products"] = merged
+    return merged
 
 
 def _tokens(text):
@@ -145,7 +193,11 @@ def _resolve(href, base_url):
 def find_url(product_name):
     config = SITE_SEARCH_CONFIG[SITE]
 
-    products = _get_catalog()
+    # Primary (no browser): score the catalog API records locally.
+    try:
+        products = _get_catalog()
+    except Exception:
+        products = []
     scored = []
     for record in products:
         score = _score_record(product_name, record)
@@ -156,19 +208,41 @@ def find_url(product_name):
                 rate = 0
             if rate > 0:
                 scored.append((score, record))
-    if not scored:
-        raise ValueError(f"Couldn't find '{product_name}' on {SITE}.")
     scored.sort(key=lambda item: item[0], reverse=True)
-    best = scored[0][1]
+    if scored:
+        for _score, record in scored[:3]:
+            for candidate in _candidate_urls(record):
+                if _verify_url(candidate, record):
+                    return candidate
 
-    for candidate in _candidate_urls(best):
-        if _verify_url(candidate, best):
-            return candidate
+    # Fallback 1 (no browser): pinned URLs for listings the catalog API
+    # doesn't carry (navel/valencia oranges). Verified live via the same
+    # h1 check - a renamed/delisted product fails loudly instead of
+    # recording a stale price. This is what serves the hosted run.
+    known = KNOWN_URLS.get(product_name.strip().lower())
+    if known and _verify_url(known, {"stockDesc": product_name}):
+        return known
 
-    # Couldn't verify a product page - return the search URL as the reference
-    # link rather than failing; scrape() falls back to the catalog record.
+    # Fallback 2 (browser): render the search page once via the stealthy
+    # browser and rank its product links. On slim hosts without browsers
+    # this raises a clear RuntimeError, surfaced per-row by app.py.
     query = product_name.strip().replace(" ", "%20")
-    return config["search_url"].format(query=query)
+    search_url = config["search_url"].format(query=query)
+    page = fetch_stealthy(search_url, wait_selector="a[href*='/product/']")
+    links = [(url, text) for url, text in iter_links(page, config["result_selector"])]
+    for href in rank_links(links, product_name)[:5]:
+        try:
+            check = fetch_fast(_resolve(href, config["base_url"]), timeout=30)
+            try:
+                h1 = (check.css("h1::text").get() or "").strip().lower()  # type: ignore[attr-defined]
+            except Exception:
+                h1 = ""
+            if h1 and product_name.lower().split()[0] in h1:
+                return _resolve(href, config["base_url"])
+        except Exception:
+            continue
+
+    raise ValueError(f"Couldn't find '{product_name}' on {SITE}.")
 
 
 def _record_from_product_url(url):

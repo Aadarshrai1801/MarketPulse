@@ -186,9 +186,15 @@ Before pointing a real domain at this app:
     `Fetcher` (Chrome TLS impersonation, no Chromium binary), so the
     slim `python:3.11-slim` image fits free-tier hosts. The
     `StealthyFetcher` browser fallback only triggers for
-    `fetch_mode="auto"` retailers when plain HTTP looks blocked — and is
-    skipped entirely on images without browsers (the row just fails with
-    a clear error).
+    `fetch_mode="auto"` retailers when plain HTTP can't do the job — and
+    is skipped entirely on images without browsers.
+7. **Unioncoop / Kibsons oranges on hosting IPs.** Unioncoop's WAF
+    answers search requests from datacenter IPs (Render) with HTTP 405,
+    and Kibsons' catalog API doesn't list navel/valencia oranges. Both
+    cases resolve via verified product-URL tables (`KNOWN_URLS` in
+    `scraper/unioncoop.py` / `scraper/kibsons.py`) — each URL is
+    re-verified live (status + title + price) before use, so a renamed
+    product fails loudly instead of recording a stale price.
 7. **Rate-limit `/api/auth/login`** (e.g. with `Flask-Limiter`) — it's
    currently unthrottled and brute-forceable.
 8. Double-check `.gitignore` excludes `secret.key`, `users.db`,

@@ -86,7 +86,7 @@ def is_blocked_page(page):
         status = int(getattr(page, "status", 200) or 200)
     except Exception:
         status = 200
-    if status in (403, 429, 503):
+    if status in (403, 405, 429, 503):
         return True
     haystack = f"{_page_title(page)} {_page_text(page, limit=5000)}".lower()
     if len(haystack.strip()) < 200:
@@ -115,27 +115,36 @@ def fetch_fast(url, timeout=FAST_TIMEOUT):
     return page
 
 
-def fetch_stealthy(url, timeout=STEALTHY_TIMEOUT):
+def fetch_stealthy(url, timeout=STEALTHY_TIMEOUT, wait_selector=None):
     """One Scrapling ``StealthyFetcher`` fetch (headless Chromium).
 
-    ONLY called when fast fetch looks blocked and the retailer's
-    ``fetch_mode`` allows it. Requires browsers from ``scrapling install``;
-    on a slim free-Render image without them this raises a clear
-    RuntimeError (caught per-row by app.py) instead of hanging.
+    ONLY called when fast HTTP can't do the job (JS-rendered listing with
+    no usable API) and the retailer's ``fetch_mode`` allows it. Requires
+    browsers from ``scrapling install``; on a slim free-Render image
+    without them this raises a clear RuntimeError (caught per-row by
+    app.py) instead of hanging.
+
+    Speed settings matter: ``network_idle`` is deliberately OFF (analytics
+    beacons poll forever and it would stall for the full timeout) -
+    pass ``wait_selector`` so the fetch returns as soon as the product
+    links attach, with trackers/images dropped for a further boost.
     """
     try:
         from scrapling.fetchers import StealthyFetcher
     except Exception as e:  # pragma: no cover
         raise RuntimeError(f"StealthyFetcher unavailable (import failed): {e}")
 
+    kwargs = dict(
+        headless=True,
+        solve_cloudflare=True,
+        timeout=timeout * 1000,
+        disable_resources=True,
+        block_ads=True,
+    )
+    if wait_selector:
+        kwargs["wait_selector"] = wait_selector
     try:
-        page = StealthyFetcher.fetch(
-            url,
-            headless=True,
-            solve_cloudflare=True,
-            network_idle=True,
-            timeout=timeout * 1000,
-        )
+        page = StealthyFetcher.fetch(url, **kwargs)
     except Exception as e:
         msg = str(e)
         if "browser" in msg.lower() or "executable" in msg.lower() or "not found" in msg.lower():
@@ -148,30 +157,43 @@ def fetch_stealthy(url, timeout=STEALTHY_TIMEOUT):
     return page
 
 
-def fetch_with_fallback(url, mode="auto", timeout=FAST_TIMEOUT):
+def fetch_with_fallback(url, mode="auto", timeout=FAST_TIMEOUT, wait_selector=None):
     """Fetch ``url`` with Fetcher, falling back to StealthyFetcher if needed.
 
     mode: "fast" (never touch a browser), "stealthy" (go straight to the
     browser), "auto" (try fast, use browser only when blocked).
+
+    In "auto" the fast stage is wrapped so that *any* fast failure -
+    an HTTP error (403/405/... from a datacenter IP) or a 200 page that
+    looks like a bot wall / JS shell - retries once via the stealthy
+    browser. If the stealthy path is unavailable (slim image without
+    browsers) the ORIGINAL fast error is re-raised, since that is the
+    actionable diagnostic on Render free ("search blocked, HTTP 405"),
+    not "browser not installed".
     """
     if mode == "stealthy":
-        return fetch_stealthy(url, timeout=STEALTHY_TIMEOUT)
+        return fetch_stealthy(url, timeout=STEALTHY_TIMEOUT, wait_selector=wait_selector)
     if mode == "fast":
         return fetch_fast(url, timeout=timeout)
     # auto
-    page = fetch_fast(url, timeout=timeout)
+    fast_error = None
+    page = None
     try:
-        if is_blocked_page(page):
-            return fetch_stealthy(url)
-    except RuntimeError:
-        # Stealthy unavailable (e.g. slim image) or stealthy itself failed:
-        # if the fast page is usable at all, return it and let the caller's
-        # selector fallbacks decide; otherwise re-raise the stealthy error
-        # so the row is marked ok=False with a clear reason.
-        if is_blocked_page(page):
-            raise
+        page = fetch_fast(url, timeout=timeout)
+    except Exception as e:
+        fast_error = e
+    if page is not None and not is_blocked_page(page):
         return page
-    return page
+    # Fast failed outright, or returned a block/JS shell: try the browser once.
+    try:
+        return fetch_stealthy(url, wait_selector=wait_selector)
+    except RuntimeError as stealth_error:
+        # No browsers on this host (Render free slim image): surface the
+        # fast error when there is one - it tells the operator what the
+        # site actually did (e.g. HTTP 405 for datacenter IPs).
+        if fast_error is not None:
+            raise fast_error from None
+        raise
 
 
 def iter_links(page, selector):
