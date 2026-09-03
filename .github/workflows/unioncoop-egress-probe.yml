@@ -1,0 +1,39 @@
+# One-shot probe: does Unioncoop's edge allow GitHub Actions (Azure) egress?
+# Run manually: Actions tab -> "Unioncoop egress probe" -> Run workflow.
+# Reads the two HTTP codes from the logs and nothing else - no secrets,
+# no DB writes. If both print 200, a scheduled cloud push is viable (see
+# scripts/push_retailer.py); if 405, Azure is blocked like Render.
+name: Unioncoop egress probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install curl_cffi (same TLS impersonation the app uses)
+        run: pip install curl_cffi
+
+      - name: Probe Unioncoop with Chrome impersonation
+        run: |
+          python - <<'EOF'
+          from curl_cffi import requests
+          urls = [
+              "https://www.unioncoop.ae/catalogsearch/result/?q=tomato",
+              "https://www.unioncoop.ae/tomato-2405057.html",
+          ]
+          for url in urls:
+              try:
+                  r = requests.get(url, impersonate="chrome", timeout=30,
+                                   headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"})
+                  print(f"HTTP {r.status_code}  {url}  ({len(r.content)} bytes)")
+              except Exception as e:
+                  print(f"ERROR  {url}  {type(e).__name__}: {e}")
+          EOF
