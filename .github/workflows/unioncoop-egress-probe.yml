@@ -1,8 +1,11 @@
-# One-shot probe: does Unioncoop's edge allow GitHub Actions (Azure) egress?
+# Sampling probe: is Unioncoop's edge block on Azure egress stable or a lottery?
+# Background: run #1 printed 200/200, later runs print 405/405 with identical
+# requests. Either different runner IPs have different reputations, or our
+# own burst tripped a rate rule. This samples 3 rounds ~90s apart AND prints
+# the runner's egress IP, so one run answers: same IP flipping (rate/time
+# based) vs different IPs differing (reputation lottery).
 # Run manually: Actions tab -> "Unioncoop egress probe" -> Run workflow.
-# Reads the two HTTP codes from the logs and nothing else - no secrets,
-# no DB writes. If both print 200, a scheduled cloud push is viable (see
-# scripts/push_retailer.py); if 405, Azure is blocked like Render.
+# Read-only: no secrets, no DB writes.
 name: Unioncoop egress probe
 
 on:
@@ -21,19 +24,35 @@ jobs:
       - name: Install curl_cffi (same TLS impersonation the app uses)
         run: pip install curl_cffi
 
-      - name: Probe Unioncoop with Chrome impersonation
+      - name: Probe Unioncoop with Chrome impersonation (3 rounds)
         run: |
           python - <<'EOF'
+          import time
           from curl_cffi import requests
+          headers = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    "Chrome/125.0.0.0 Safari/537.36")}
+          try:
+              me = requests.get("https://ipinfo.io/json", impersonate="chrome",
+                                timeout=30).json()
+              print(f"EGRESS ip={me.get('ip')} city={me.get('city')} "
+                    f"region={me.get('region')} country={me.get('country')} "
+                    f"org={me.get('org')}")
+          except Exception as e:
+              print(f"EGRESS lookup failed: {type(e).__name__}: {e}")
           urls = [
               "https://www.unioncoop.ae/catalogsearch/result/?q=tomato",
               "https://www.unioncoop.ae/tomato-2405057.html",
           ]
-          for url in urls:
-              try:
-                  r = requests.get(url, impersonate="chrome", timeout=30,
-                                   headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"})
-                  print(f"HTTP {r.status_code}  {url}  ({len(r.content)} bytes)")
-              except Exception as e:
-                  print(f"ERROR  {url}  {type(e).__name__}: {e}")
+          for round_no in (1, 2, 3):
+              for url in urls:
+                  try:
+                      r = requests.get(url, impersonate="chrome", timeout=30,
+                                       headers=headers)
+                      print(f"ROUND {round_no}  HTTP {r.status_code}  {url}  "
+                            f"({len(r.content)} bytes)")
+                  except Exception as e:
+                      print(f"ROUND {round_no}  ERROR  {url}  {type(e).__name__}: {e}")
+              if round_no < 3:
+                  time.sleep(90)
           EOF
