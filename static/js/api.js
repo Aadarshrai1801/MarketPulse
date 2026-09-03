@@ -227,19 +227,39 @@ export async function createJob(payload) {
   return response.json();
 }
 
-export async function pollJob(jobId, onProgress) {
-  const response = await fetch(`${API_BASE}/api/jobs/${jobId}?_=${Date.now()}`, { cache: 'no-store' });
-  await handleAuthRedirect(response);
-  if (!response.ok) {
+export async function pollJob(jobId, onProgress, attempts = 6) {
+  // Transient failures (proxy 502/503 while the host is under load, reset
+  // connections) are retried with backoff - a single bad poll must not kill
+  // a minutes-long job. 4xx is different: the job is genuinely gone
+  // (e.g. the server restarted and its in-memory jobs were wiped), so fail
+  // fast with a message that says to just fetch again.
+  let lastError = new Error('The job could not be polled.');
+  for (let i = 0; i < attempts; i++) {
+    let response;
+    try {
+      response = await fetch(`${API_BASE}/api/jobs/${jobId}?_=${Date.now()}`, { cache: 'no-store' });
+    } catch {
+      lastError = new Error('Lost connection while polling the job.');
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      continue;
+    }
+    await handleAuthRedirect(response);
+    if (response.ok) {
+      const data = await response.json();
+      if (typeof onProgress === 'function') {
+        onProgress(data);
+      }
+      return data;
+    }
+    if (response.status >= 400 && response.status < 500) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || 'The job is no longer on the server (it may have restarted). Fetch again.');
+    }
     const error = await response.json().catch(() => ({}));
-    throw new Error(error.error || 'The job could not be polled.');
+    lastError = new Error(error.error || 'The job could not be polled.');
+    await new Promise((resolve) => setTimeout(resolve, 2000));
   }
-
-  const data = await response.json();
-  if (typeof onProgress === 'function') {
-    onProgress(data);
-  }
-  return data;
+  throw lastError;
 }
 
 export async function loadHistory(payload = {}) {

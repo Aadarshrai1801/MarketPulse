@@ -9,6 +9,7 @@ by every lookup. fetch_mode stays "fast": a browser is never used.
 """
 
 import re
+import threading
 import time
 from datetime import datetime
 
@@ -33,32 +34,36 @@ URL_OVERRIDES = {
 }
 
 _sitemap_cache = {"at": 0.0, "urls": []}
+# Single-flight (same OOM rationale as the Kibsons catalog lock): one
+# thread fetches the 6MB sitemap, the rest wait and share it.
+_sitemap_lock = threading.Lock()
 
 
 def _get_sitemap_urls():
     now = time.time()
     if _sitemap_cache["urls"] and now - _sitemap_cache["at"] < SITEMAP_TTL_SECONDS:
         return _sitemap_cache["urls"]
-    from scrapling.fetchers import Fetcher
+    with _sitemap_lock:
+        now = time.time()
+        if _sitemap_cache["urls"] and now - _sitemap_cache["at"] < SITEMAP_TTL_SECONDS:
+            return _sitemap_cache["urls"]
+        from scrapling.fetchers import Fetcher
 
-    page = Fetcher.get(
-        SITEMAP_URL,
-        impersonate="chrome",
-        stealthy_headers=True,
-        timeout=60,
-    )
-    body = bytes(page.body or b"").decode("utf-8-sig", "ignore")
-    urls = re.findall(r"<loc>(.*?)</loc>", body)
-    urls = [u.strip() for u in urls if u.strip().endswith(".html")]
-    if not urls:
-        raise ValueError("Barakat sitemap returned no product URLs.")
-    _sitemap_cache["at"] = now
-    _sitemap_cache["urls"] = urls
-    return urls
-
-
-def _tokens(text):
-    return [t for t in re.split(r"[^a-z0-9]+", (text or "").lower()) if t]
+        page = Fetcher.get(
+            SITEMAP_URL,
+            impersonate="chrome",
+            stealthy_headers=True,
+            timeout=60,
+        )
+        body = bytes(page.body or b"").decode("utf-8-sig", "ignore")
+        del page
+        urls = re.findall(r"<loc>(.*?)</loc>", body)
+        urls = [u.strip() for u in urls if u.strip().endswith(".html")]
+        if not urls:
+            raise ValueError("Barakat sitemap returned no product URLs.")
+        _sitemap_cache["at"] = time.time()
+        _sitemap_cache["urls"] = urls
+        return urls
 
 
 def _tokens(text):

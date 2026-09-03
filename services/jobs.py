@@ -7,7 +7,10 @@ request - either run ``-w 1`` or move this state to Redis/a DB.
 
 Free Render has 0.5 CPU / 512MB RAM: Scrapling Fetcher rows are I/O-bound
 (~2-5s each), so a small thread pool cuts all/all (40 lookups) from
-minutes to ~30s without the RAM spike a browser pool would cause.
+minutes to ~1-2 minutes without the RAM spike a large pool would cause.
+Peak per-thread memory (response bodies + lxml trees) is what OOM-kills
+the container, so keep this low - raise via FETCH_WORKERS only on hosts
+with headroom.
 """
 import os
 import threading
@@ -16,7 +19,7 @@ from datetime import datetime
 
 from .fetch import scrape_one
 
-FETCH_WORKERS = int(os.environ.get("FETCH_WORKERS", "5"))
+FETCH_WORKERS = int(os.environ.get("FETCH_WORKERS", "3"))
 
 JOBS = {}
 JOBS_LOCK = threading.Lock()

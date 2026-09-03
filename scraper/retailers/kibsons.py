@@ -14,7 +14,9 @@ The 14MB catalog is fetched at most once per CATALOG_TTL_SECONDS and shared
 by every lookup, so an all-products job costs one heavy request, not 40.
 """
 
+import gc
 import re
+import threading
 import time
 from datetime import datetime
 
@@ -56,6 +58,11 @@ _CATALOG_FIELDS = (
 )
 
 _catalog_cache = {"at": 0.0, "products": []}
+# Single-flight: without this, N pool threads with a cold cache each fetch
+# all catalog pages at once (N x 5 pages x ~14MB JSON parsed simultaneously),
+# which OOM-kills the 512MB Render free container mid-job. The lock forces
+# one fetch; the rest wait and share the result.
+_catalog_lock = threading.Lock()
 
 
 def _project_record(record):
@@ -66,6 +73,18 @@ def _get_catalog():
     now = time.time()
     if _catalog_cache["products"] and now - _catalog_cache["at"] < CATALOG_TTL_SECONDS:
         return _catalog_cache["products"]
+    with _catalog_lock:
+        # Double-check: another thread may have filled the cache while we waited.
+        now = time.time()
+        if _catalog_cache["products"] and now - _catalog_cache["at"] < CATALOG_TTL_SECONDS:
+            return _catalog_cache["products"]
+        products = _fetch_catalog_pages()
+        _catalog_cache["at"] = time.time()
+        _catalog_cache["products"] = products
+        return products
+
+
+def _fetch_catalog_pages():
     from scrapling.fetchers import Fetcher
 
     import json as _json
@@ -82,6 +101,7 @@ def _get_catalog():
             timeout=60,
         )
         data = _json.loads(bytes(page.body or b"").decode("utf-8", "ignore"))
+        del page
         node = data.get("data") or {}
         if total is None:
             try:
@@ -89,6 +109,7 @@ def _get_catalog():
             except (TypeError, ValueError):
                 total = 0
         batch = node.get("products") or []
+        del data, node
         if not batch:
             break
         for record in batch:
@@ -96,12 +117,14 @@ def _get_catalog():
             if code and code not in seen_codes:
                 seen_codes.add(code)
                 merged.append(_project_record(record))
+        del batch
         if total and len(merged) >= total:
             break
     if not merged:
         raise ValueError("Kibsons catalog API returned no products.")
-    _catalog_cache["at"] = now
-    _catalog_cache["products"] = merged
+    # Drop the transient per-page response trees promptly - peak RSS is what
+    # kills the 512MB Render container, not the retained projection.
+    gc.collect()
     return merged
 
 
