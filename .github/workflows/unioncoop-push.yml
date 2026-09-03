@@ -1,0 +1,54 @@
+# Daily Unioncoop push from GitHub Actions (Azure) egress.
+#
+# Why this exists: Unioncoop's Fastly edge 405s every request from Render's
+# egress IPs (search AND product pages), but allows GitHub Actions runners -
+# verified by unioncoop-egress-probe.yml (HTTP 200 on both URLs). So the
+# hosted app keeps DISABLED_RETAILERS=unioncoop (never attempts it there),
+# and this workflow scrapes Unioncoop from here and upserts the exact same
+# records (price_history + latest_fetch) into MongoDB. The dashboard reads
+# from Mongo, so Unioncoop rows show up with no proxy and no local machine.
+#
+# No browsers are installed: find_url() resolves via live search when it can
+# and via verified KNOWN_URLS otherwise (both plain HTTP, both 200 from here).
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   MONGODB_URI   - same Atlas connection string as Render uses
+#   MONGO_DB_NAME - same database name as Render uses (must match!)
+#
+# Free-tier cost: ~3-5 min/day, far inside the 2,000 min/month allowance.
+# A non-zero exit (partial row failure) marks the run failed - enable
+# Actions notifications to hear about it.
+name: Unioncoop daily push
+
+on:
+  schedule:
+    # 04:00 UTC = 08:00 GST (UAE) daily
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: unioncoop-push
+  cancel-in-progress: false
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Scrape Unioncoop and push to MongoDB
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGO_DB_NAME: ${{ secrets.MONGO_DB_NAME }}
+        run: python scripts/push_retailer.py --retailer unioncoop

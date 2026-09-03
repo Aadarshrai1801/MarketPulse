@@ -60,13 +60,15 @@ editor / admin), and optional "Continue with Google" sign-in.
   a synthesized sheet.
 - `scripts/migrate_to_mongo.py` — one-time script that copies your
   existing `users.db` and `products.xlsx` into MongoDB. Safe to re-run.
-- `scripts/push_retailer.py` — run on a machine whose egress a site
-  allows (e.g. your home PC for Unioncoop, which 405s hosting
-  datacenter IPs): scrapes one retailer and pushes the rows into the
-  same MongoDB the hosted app reads, so the dashboard shows them with no
-  proxy. Example: `python scripts/push_retailer.py --retailer unioncoop`
-  (schedule daily via Windows Task Scheduler; exits nonzero unless every
-  row succeeds).
+- `scripts/push_retailer.py` — scrape one retailer from THIS machine and
+  push the rows into MongoDB (`python scripts/push_retailer.py --retailer
+  unioncoop`; exits nonzero unless every row succeeds). Used two ways:
+  manually/scheduled on a machine whose egress a site allows, and — for
+  Unioncoop — by the daily `Unioncoop daily push` GitHub Action
+  (`.github/workflows/unioncoop-push.yml`, 04:00 UTC), because
+  Unioncoop's edge 405s Render's egress but allows Actions runners
+  (verified by `unioncoop-egress-probe.yml`). Needs `MONGODB_URI` /
+  `MONGO_DB_NAME` repo secrets matching Render's values.
 - `app.py` — Flask backend (routes only):
   - `GET /api/meta` — retailer + product lists for the dropdowns.
   - `POST /api/fetch` — **synchronous.** Runs the scraper for the
