@@ -49,7 +49,7 @@ def find_url(product_name):
     query = quote(product_name.strip())
     search_url = config["search_url"].format(query=query)
 
-    page = fetch_with_fallback(search_url, mode=mode)
+    page = fetch_with_fallback(search_url, mode=mode, site=SITE)
 
     # Ranked like carrefour: prefer the closest keyword match (fewest extra
     # tokens) over whatever the site slots first.
@@ -76,7 +76,7 @@ def find_url(product_name):
 def scrape(url):
     config = SITE_SEARCH_CONFIG[SITE]
     mode = config.get("fetch_mode", "auto")
-    page = fetch_with_fallback(url, mode=mode)
+    page = fetch_with_fallback(url, mode=mode, site=SITE)
     body_text = _page_text(page)
 
     # PRODUCT NAME

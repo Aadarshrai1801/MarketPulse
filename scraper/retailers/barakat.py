@@ -141,7 +141,7 @@ def _page_looks_like_product(page):
 
 def _verify_override(url):
     try:
-        page = fetch_with_fallback(url, mode="fast")
+        page = fetch_with_fallback(url, mode="fast", site=SITE)
     except Exception:
         return False
     return _page_looks_like_product(page)
@@ -149,7 +149,7 @@ def _verify_override(url):
 
 def _verify_url(url, product_name, mode):
     try:
-        page = fetch_with_fallback(url, mode="fast")
+        page = fetch_with_fallback(url, mode="fast", site=SITE)
     except Exception:
         return False
     try:
@@ -239,7 +239,7 @@ def find_url(product_name):
 def scrape(url):
     config = SITE_SEARCH_CONFIG[SITE]
     mode = config.get("fetch_mode", "fast")
-    page = fetch_with_fallback(url, mode=mode)
+    page = fetch_with_fallback(url, mode=mode, site=SITE)
 
     # ---------------------------------------------------------
     # PRODUCT NAME

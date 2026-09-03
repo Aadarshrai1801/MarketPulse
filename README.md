@@ -114,6 +114,7 @@ the first run on any server other machines can reach.**
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` | Optional | Enables the "Continue with Google" button. Create credentials at the [Google Cloud Console](https://console.cloud.google.com/apis/credentials); `GOOGLE_REDIRECT_URI` must exactly match an authorized redirect URI there, e.g. `https://yourdomain.com/auth/google/callback`. |
 | `GOOGLE_DEFAULT_ROLE` | Optional | Role assigned to new accounts created via Google sign-in. Defaults to `viewer`. |
 | `DISABLED_RETAILERS` | Optional | Comma-separated retailer ids to hide from the UI and skip in jobs (e.g. `DISABLED_RETAILERS=unioncoop`). For hosts whose datacenter IPs a site's WAF blocks — Unioncoop rejects Render egress (search 405s and even product pages fail), so set this on Render and run 32/32 there; leave unset locally to keep all 5 retailers. |
+| `PROXY_<SITE>` | Optional | Per-retailer egress proxy, e.g. `PROXY_UNIONCOOP=http://user:pass@host:port` routes only Unioncoop through it. The way back to Unioncoop data on hosting: a UAE-exit proxy (their Fastly edge allowlists by egress IP). Without one, keep the retailer disabled on that host. |
 | `FETCH_WORKERS` | Optional | Job thread-pool size. Defaults to `3` (safe for 512MB Render free). Raise only on hosts with headroom. |
 
 Keep these in a local `.env` (not committed — see `.env.example` for a

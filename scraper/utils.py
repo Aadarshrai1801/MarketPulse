@@ -12,6 +12,7 @@ stealthy path raises a clear RuntimeError instead of crashing the job -
 app.py turns that into an ``ok: False`` row.
 """
 
+import os
 import re
 
 STEALTH_USER_AGENT = (
@@ -83,27 +84,48 @@ def is_blocked_page(page):
     return any(marker in haystack for marker in _BLOCK_MARKERS)
 
 
-def fetch_fast(url, timeout=FAST_TIMEOUT):
+def proxy_for(site):
+    """Proxy URL for one retailer from its ``PROXY_<SITE>`` env var, e.g.
+    ``PROXY_UNIONCOOP=http://user:pass@host:port``. Lets a single retailer
+    egress via different IPs than the rest of the app - the use case is a
+    geo-fenced site (Unioncoop's Fastly edge 405s every request from
+    hosting datacenter IPs): point just that retailer at a UAE-exit proxy
+    while everything else goes direct. Applies to the fetch_fast /
+    fetch_stealthy / fetch_with_fallback paths (pass ``site=``); bulk
+    catalog/sitemap endpoints that call Fetcher directly stay direct.
+    Returns None (direct) when unset.
+    """
+    if not site:
+        return None
+    return os.environ.get(f"PROXY_{site.strip().upper()}") or None
+
+
+def fetch_fast(url, timeout=FAST_TIMEOUT, proxy=None, site=None):
     """One Scrapling ``Fetcher`` GET with Chrome TLS impersonation.
 
     Needs only ``pip install "scrapling[fetchers]"`` - no browser binary,
     so it runs on Render free (512MB RAM).
     """
+    if proxy is None and site:
+        proxy = proxy_for(site)
     from scrapling.fetchers import Fetcher
 
-    page = Fetcher.get(
-        url,
+    kwargs = dict(
         impersonate=BROWSER_IMPERSONATE,
         stealthy_headers=True,
         timeout=timeout,
     )
+    if proxy:
+        kwargs["proxy"] = proxy
+    page = Fetcher.get(url, **kwargs)
     status = int(getattr(page, "status", 200) or 200)
     if status >= 400:
         raise RuntimeError(f"Fast fetch failed for {url}: HTTP {status}")
     return page
 
 
-def fetch_stealthy(url, timeout=STEALTHY_TIMEOUT, wait_selector=None):
+def fetch_stealthy(url, timeout=STEALTHY_TIMEOUT, wait_selector=None, proxy=None,
+                   site=None):
     """One Scrapling ``StealthyFetcher`` fetch (headless Chromium).
 
     ONLY called when fast HTTP can't do the job (JS-rendered listing with
@@ -122,6 +144,8 @@ def fetch_stealthy(url, timeout=STEALTHY_TIMEOUT, wait_selector=None):
     except Exception as e:  # pragma: no cover
         raise RuntimeError(f"StealthyFetcher unavailable (import failed): {e}")
 
+    if proxy is None and site:
+        proxy = proxy_for(site)
     kwargs = dict(
         headless=True,
         solve_cloudflare=True,
@@ -131,6 +155,8 @@ def fetch_stealthy(url, timeout=STEALTHY_TIMEOUT, wait_selector=None):
     )
     if wait_selector:
         kwargs["wait_selector"] = wait_selector
+    if proxy:
+        kwargs["proxy"] = proxy
     try:
         page = StealthyFetcher.fetch(url, **kwargs)
     except Exception as e:
@@ -145,7 +171,8 @@ def fetch_stealthy(url, timeout=STEALTHY_TIMEOUT, wait_selector=None):
     return page
 
 
-def fetch_with_fallback(url, mode="auto", timeout=FAST_TIMEOUT, wait_selector=None):
+def fetch_with_fallback(url, mode="auto", timeout=FAST_TIMEOUT, wait_selector=None,
+                        proxy=None, site=None):
     """Fetch ``url`` with Fetcher, falling back to StealthyFetcher if needed.
 
     mode: "fast" (never touch a browser), "stealthy" (go straight to the
@@ -158,23 +185,29 @@ def fetch_with_fallback(url, mode="auto", timeout=FAST_TIMEOUT, wait_selector=No
     browsers) the ORIGINAL fast error is re-raised, since that is the
     actionable diagnostic on Render free ("search blocked, HTTP 405"),
     not "browser not installed".
+
+    Pass ``site`` (retailer id) so a per-retailer ``PROXY_<SITE>`` egress
+    proxy applies to both stages, or ``proxy`` to force one URL directly.
     """
+    if proxy is None and site:
+        proxy = proxy_for(site)
     if mode == "stealthy":
-        return fetch_stealthy(url, timeout=STEALTHY_TIMEOUT, wait_selector=wait_selector)
+        return fetch_stealthy(url, timeout=STEALTHY_TIMEOUT, wait_selector=wait_selector,
+                              proxy=proxy)
     if mode == "fast":
-        return fetch_fast(url, timeout=timeout)
+        return fetch_fast(url, timeout=timeout, proxy=proxy)
     # auto
     fast_error = None
     page = None
     try:
-        page = fetch_fast(url, timeout=timeout)
+        page = fetch_fast(url, timeout=timeout, proxy=proxy)
     except Exception as e:
         fast_error = e
     if page is not None and not is_blocked_page(page):
         return page
     # Fast failed outright, or returned a block/JS shell: try the browser once.
     try:
-        return fetch_stealthy(url, wait_selector=wait_selector)
+        return fetch_stealthy(url, wait_selector=wait_selector, proxy=proxy)
     except RuntimeError as stealth_error:
         # No browsers on this host (Render free slim image): surface the
         # fast error when there is one - it tells the operator what the

@@ -108,7 +108,8 @@ def find_url(product_name):
     # without browsers it re-raises the fast error, e.g. HTTP 405).
     search_error = None
     try:
-        page = fetch_with_fallback(search_url, mode=mode, wait_selector="a.result")
+        page = fetch_with_fallback(search_url, mode=mode, wait_selector="a.result",
+                                 site=SITE)
     except Exception as e:
         page = None
         search_error = e
@@ -118,8 +119,11 @@ def find_url(product_name):
         if found:
             return _resolve(found, config["base_url"])
 
-    # Stage 3: verified known-URL fallback (no browser needed) - this is
-    # what saves the hosted run when the WAF blocks datacenter search.
+    # Stage 3: verified known-URL fallback (no browser needed) - covers
+    # search outages where product pages still answer. (When the whole
+    # domain blocks an egress network, e.g. Render datacenters, this fails
+    # too - then DISABLED_RETAILERS=unioncoop, or PROXY_UNIONCOOP pointing
+    # at an allowed egress. See services/fetch.py and utils.proxy_for.)
     known = _known_url_for(product_name)
     known_ok, known_reason = _check_known_url(known) if known else (False, "no known URL")
     if known_ok:
@@ -175,7 +179,7 @@ def _check_known_url(url):
     if not url:
         return False, "no known URL"
     try:
-        page = fetch_fast(url, timeout=30)
+        page = fetch_fast(url, timeout=30, site=SITE)
     except Exception as e:
         return False, f"product page fetch failed ({e})"
     try:
@@ -198,7 +202,7 @@ def _check_known_url(url):
 def scrape(url):
     config = SITE_SEARCH_CONFIG[SITE]
     mode = config.get("fetch_mode", "fast")
-    page = fetch_with_fallback(url, mode=mode)
+    page = fetch_with_fallback(url, mode=mode, site=SITE)
     body_text = _page_text(page)
 
     # ---------------------------------------------------------

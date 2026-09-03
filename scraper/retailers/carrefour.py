@@ -78,7 +78,7 @@ def find_url(product_name):
     query = product_name.strip().replace(" ", "%20")
     search_url = config["search_url"].format(query=query)
 
-    page = fetch_with_fallback(search_url, mode=mode)
+    page = fetch_with_fallback(search_url, mode=mode, site=SITE)
 
     # Ranked: an unrelated first result (e.g. a sponsored slot) must not
     # win over a real keyword match further down the list.
@@ -104,7 +104,7 @@ def find_url(product_name):
 def scrape(url):
     config = SITE_SEARCH_CONFIG[SITE]
     mode = config.get("fetch_mode", "auto")
-    page = fetch_with_fallback(url, mode=mode)
+    page = fetch_with_fallback(url, mode=mode, site=SITE)
     body_text = _page_text(page)
 
     # Note: the title sits nested (<h1><span>Tomato</span></h1>), so plain

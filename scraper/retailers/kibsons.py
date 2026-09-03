@@ -193,7 +193,7 @@ def _product_name_words(record):
 def _verify_url(url, record):
     """Fetch candidate product page; accept it if its <h1> matches the record."""
     try:
-        page = fetch_fast(url, timeout=30)
+        page = fetch_fast(url, timeout=30, site=SITE)
     except Exception:
         return False
     try:
@@ -251,11 +251,11 @@ def find_url(product_name):
     # this raises a clear RuntimeError, surfaced per-row by app.py.
     query = product_name.strip().replace(" ", "%20")
     search_url = config["search_url"].format(query=query)
-    page = fetch_stealthy(search_url, wait_selector="a[href*='/product/']")
+    page = fetch_stealthy(search_url, wait_selector="a[href*='/product/']", site=SITE)
     links = [(url, text) for url, text in iter_links(page, config["result_selector"])]
     for href in rank_links(links, product_name)[:5]:
         try:
-            check = fetch_fast(_resolve(href, config["base_url"]), timeout=30)
+            check = fetch_fast(_resolve(href, config["base_url"]), timeout=30, site=SITE)
             try:
                 h1 = (check.css("h1::text").get() or "").strip().lower()  # type: ignore[attr-defined]
             except Exception:
@@ -297,7 +297,7 @@ def scrape(url):
     catalog_record = None
 
     try:
-        page = fetch_with_fallback(url, mode=mode)
+        page = fetch_with_fallback(url, mode=mode, site=SITE)
     except Exception:
         page = None
 
