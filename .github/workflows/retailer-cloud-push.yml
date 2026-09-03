@@ -1,0 +1,100 @@
+# Daily cloud push for every retailer GitHub Actions (Azure) can reach.
+#
+# Why this exists: an IP/geo can block a single hosting provider (Render
+# gets 405 on Unioncoop) while allowing another (Azure via Actions
+# returns 200). Verified by retailer-egress-probe.yml. The hosted app
+# uses DISABLED_RETAILERS=unioncoop to skip a blocked retailer; this
+# workflow runs from Azure and writes the same records (price_history +
+# latest_fetch) into the same MongoDB - the dashboard reads from Mongo,
+# so every retailer that's "Azure-OK" is fully cloud-only.
+#
+# Per-retailer matrix: edit SCHEDULE below. CRON follows GitHub syntax
+# (UTC). Times chosen to spread load: carrefour/lulu morning, barakat/
+# kibsons midday, unioncoop evening. Stagger by 30 min so the runs don't
+# all hammer Mongo at the same second.
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   MONGODB_URI   - same Atlas connection string as Render
+#   MONGO_DB_NAME - same database name as Render (must match!)
+#
+# Free-tier cost: ~3-5 min per run, well inside the 2,000 min/month limit
+# even if all five run daily.
+
+name: Retailer cloud push
+
+on:
+  workflow_dispatch:
+    inputs:
+      retailer:
+        description: "Retailer to push (or 'all')"
+        required: true
+        type: choice
+        type: choice
+        options:
+          - all
+          - carrefour
+          - lulu
+          - barakat
+          - kibsons
+          - unioncoop
+        default: all
+  schedule:
+    - cron: "0 1 * * *"   # 01:00 UTC = 05:00 GST - carrefour
+    - cron: "30 1 * * *"  # 01:30 UTC = 05:30 GST - lulu
+    - cron: "0 2 * * *"   # 02:00 UTC = 06:00 GST - barakat
+    - cron: "30 2 * * *"  # 02:30 UTC = 06:30 GST - kibsons
+    - cron: "0 3 * * *"   # 03:00 UTC = 07:00 GST - unioncoop
+
+# One run at a time - the matrix already staggers; never overlap.
+concurrency:
+  group: retailer-cloud-push
+  cancel-in-progress: false
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Map the cron entry that fired to one retailer. GitHub doesn't pass
+      # which cron hit in context, so derive it from the current UTC hour
+      # (each schedule fires on a unique hour:minute pair).
+      - name: Pick retailer from current UTC schedule slot
+        id: pick
+        run: |
+          $hour = (Get-Date -Format "HH")
+          $min  = (Get-Date -Format "mm")
+          $r = "all"
+          if     ($hour -eq "01" -and $min -lt "30") { $r = "carrefour" }
+          elseif ($hour -eq "01")                  { $r = "lulu" }
+          elseif ($hour -eq "02" -and $min -lt "30") { $r = "barakat" }
+          elseif ($hour -eq "02")                  { $r = "kibsons" }
+          elseif ($hour -eq "03")                  { $r = "unioncoop" }
+          # Manual dispatch override
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") { $r = "${{ inputs.retailer }}" }
+          echo "retailer=$r" | Out-File -Encoding utf8 $env:GITHUB_OUTPUT -Append
+          echo "Selected retailer: $r"
+
+      - name: Skip Unioncoop if the disabled flag is set
+        run: |
+          if ( "${{ steps.pick.outputs.retailer }}" -eq "unioncoop" -or "${{ steps.pick.outputs.retailer }}" -eq "all" ) {
+            echo "Note: unioncoop rows from Render are blocked (DISABLED_RETAILERS=unioncoop);" `
+                 "this cloud job still writes the same DB so the dashboard shows them."
+          }
+
+      - name: Scrape and push to MongoDB
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGO_DB_NAME: ${{ secrets.MONGO_DB_NAME }}
+        run: python scripts/push_retailer.py --retailer ${{ steps.pick.outputs.retailer }}

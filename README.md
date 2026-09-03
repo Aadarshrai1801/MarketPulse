@@ -60,15 +60,34 @@ editor / admin), and optional "Continue with Google" sign-in.
   a synthesized sheet.
 - `scripts/migrate_to_mongo.py` — one-time script that copies your
   existing `users.db` and `products.xlsx` into MongoDB. Safe to re-run.
-- `scripts/push_retailer.py` — scrape one retailer from THIS machine and
-  push the rows into MongoDB (`python scripts/push_retailer.py --retailer
-  unioncoop`; exits nonzero unless every row succeeds). Used two ways:
-  manually/scheduled on a machine whose egress a site allows, and — for
-  Unioncoop — by the daily `Unioncoop daily push` GitHub Action
-  (`.github/workflows/unioncoop-push.yml`, 04:00 UTC), because
-  Unioncoop's edge 405s Render's egress but allows Actions runners
-  (verified by `unioncoop-egress-probe.yml`). Needs `MONGODB_URI` /
-  `MONGO_DB_NAME` repo secrets matching Render's values.
+- `scripts/push_retailer.py` — scrape one retailer and push the rows
+  into MongoDB (`python scripts/push_retailer.py --retailer unioncoop`;
+  exits nonzero unless every row succeeds). Used two ways: manually on
+  a machine whose egress a site allows, and — for any retailer Actions
+  can reach — by the `Retailer cloud push` GitHub Action
+  (`.github/workflows/retailer-cloud-push.yml`, staggered 01:00–03:00
+  UTC). Staggered schedule:
+
+  | UTC time (GST) | Retailer |
+  |---|---|
+  | 01:00 (05:00) | carrefour |
+  | 01:30 (05:30) | lulu |
+  | 02:00 (06:00) | barakat |
+  | 02:30 (06:30) | kibsons |
+  | 03:00 (07:00) | unioncoop |
+
+  Even with all 5 enabled this is well inside the 2,000 min/month free
+  tier. Needs `MONGODB_URI` / `MONGO_DB_NAME` repo secrets matching
+  Render's values. Manual "Run workflow" with a retailer dropdown also
+  supported for ad-hoc pushes.
+- `.github/workflows/retailer-egress-probe.yml` — one-shot probe of
+  every retailer from a fresh Actions runner; the log's HTTP codes tell
+  you which retailers are cloud-friendly. Run this once before relying
+  on the cloud push.
+- `.github/workflows/unioncoop-egress-probe.yml` — original narrower
+  Unioncoop-only probe (kept for reference).
+- `.github/workflows/unioncoop-egress-probe.yml` — original narrower
+  probe (Unioncoop only).
 - `app.py` — Flask backend (routes only):
   - `GET /api/meta` — retailer + product lists for the dropdowns.
   - `POST /api/fetch` — **synchronous.** Runs the scraper for the

@@ -1,0 +1,63 @@
+# Probes Unioncoop, Carrefour, Lulu, Barakat, Kibsons from a fresh
+# GitHub Actions runner (Azure egress) using the same TLS impersonation
+# our app uses (curl_cffi + Chrome). One HTTP code per retailer answers
+# "is this host allowed to fetch this site?". The results table lives in
+# the job's log - read it, fill the table in this file's comments for
+# future you, and only run the cloud-push workflow for retailers that
+# came back 200.
+#
+# Manual trigger: Actions -> "Retailer egress probe" -> Run workflow.
+# 100% read-only: writes nothing, requires no secrets.
+
+name: Retailer egress probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install curl_cffi
+        run: pip install curl_cffi
+
+      - name: Probe every retailer
+        run: |
+          python - <<'EOF'
+          from curl_cffi import requests
+          headers = {
+              "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                             "AppleWebKit/537.36 (KHTML, like Gecko) "
+                             "Chrome/125.0.0.0 Safari/537.36"),
+              "Accept-Language": "en-US,en;q=0.9",
+          }
+          # One search + one product URL per retailer. (URLs picked from
+          # retailer ranking results checked live 2026-09-03; tweak here
+          # if any rot.)
+          targets = [
+              ("unioncoop",  "https://www.unioncoop.ae/catalogsearch/result/?q=tomato"),
+              ("unioncoop",  "https://www.unioncoop.ae/tomato-2405057.html"),
+              ("carrefour",  "https://www.carrefouruae.com/mafuae/en/search?keyword=tomato"),
+              ("carrefour",  "https://www.carrefouruae.com/mafuae/en/tomato/tomato-ep/p/1767482"),
+              ("lulu",       "https://gcc.luluhypermarket.com/en-ae/list/?search_text=tomato"),
+              ("lulu",       "https://gcc.luluhypermarket.com/en-ae/p/372444-ea/?convtobuom=500"),
+              ("barakat",    "https://barakatfresh.ae/en/tomato-1kg.html"),
+              ("kibsons",    "https://apinode.kibsons.com/product/productsv26"),
+          ]
+          for site, url in targets:
+              try:
+                  r = requests.post(url, impersonate="chrome", timeout=30,
+                                    headers=headers, json={"search": "x"})
+                  if r.status_code == 405:  # POST not allowed -> try GET
+                      r = requests.get(url, impersonate="chrome", timeout=30,
+                                       headers=headers)
+                  print(f"HTTP {r.status_code}  {site:9s}  {len(r.content):>7d} B  {url}")
+              except Exception as e:
+                  print(f"ERROR   {site:9s}  {type(e).__name__}: {e}")
+          EOF
