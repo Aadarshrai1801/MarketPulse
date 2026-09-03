@@ -2,6 +2,14 @@
 Small helpers shared by more than one retailer module. Nothing here is
 retailer-specific - if it only applies to one site, it belongs in that
 site's own file instead.
+
+Free-Render design: Scrapling ``Fetcher`` (plain HTTP + TLS impersonation)
+is the default and needs no browser binary. ``StealthyFetcher`` (headless
+Chromium that solves Cloudflare Turnstile) is used ONLY as a fallback for
+retailers whose ``fetch_mode`` is "auto"/"stealthy" AND whose fast request
+looks blocked. On a slim image without ``scrapling install`` browsers, the
+stealthy path raises a clear RuntimeError instead of crashing the job -
+app.py turns that into an ``ok: False`` row.
 """
 
 import re
@@ -11,33 +19,287 @@ STEALTH_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
 
+BROWSER_IMPERSONATE = "chrome"
+FAST_TIMEOUT = 30
+STEALTHY_TIMEOUT = 60
 
-def launch_stealth_browser(playwright):
+# Markers that almost always mean "bot wall / challenge page" rather than a
+# real search/product page, even when HTTP status is 200.
+_BLOCK_MARKERS = (
+    "just a moment",
+    "attention required",
+    "verify you are human",
+    "cloudflare",
+    "datadome",
+    "perimeterx",
+    "press & hold",
+)
+
+
+def launch_stealth_browser(playwright):  # pragma: no cover
+    """Kept so old imports fail loudly instead of silently.
+
+    Playwright was removed in favour of Scrapling (free-Render friendly).
+    Use :func:`fetch_with_fallback` instead.
     """
-    Launch a headless Chrome browser + context set up to look like an
-    ordinary desktop browser: fixed user-agent/viewport/locale, and
-    navigator.webdriver hidden so sites are less likely to flag us as a
-    bot. Used by every retailer except Barakat's search step, which
-    intentionally uses a bare page with no custom context.
-
-    Returns (browser, context, page). The caller owns closing `browser`
-    when done (closing the browser also closes its context/page).
-    """
-    browser = playwright.chromium.launch(headless=True, channel="chrome")
-
-    context = browser.new_context(
-        user_agent=STEALTH_USER_AGENT,
-        viewport={"width": 1366, "height": 768},
-        locale="en-US",
+    raise RuntimeError(
+        "launch_stealth_browser() was removed with Playwright. "
+        "Use scraper.utils.fetch_with_fallback() (Scrapling Fetcher) instead."
     )
 
-    context.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+
+def _page_text(page, limit=200000):
+    """Best-effort visible text of a Scrapling Response/Selector."""
+    # 1. Raw body decode (fastest, always available as bytes on Response).
+    try:
+        body = getattr(page, "body", b"")
+        if isinstance(body, (bytes, bytearray)) and body:
+            return bytes(body).decode(
+                getattr(page, "encoding", None) or "utf-8", errors="ignore"
+            )[:limit]
+    except Exception:
+        pass
+    # 2. Selector text extraction fallback.
+    try:
+        parts = page.css("body ::text").getall()  # type: ignore[attr-defined]
+        if parts:
+            return " ".join(p.strip() for p in parts if p and p.strip())[:limit]
+    except Exception:
+        pass
+    try:
+        return str(page)[:limit]
+    except Exception:
+        return ""
+
+
+def _page_title(page):
+    try:
+        title = page.css("title::text").get()  # type: ignore[attr-defined]
+        return (title or "").strip()
+    except Exception:
+        return ""
+
+
+def is_blocked_page(page):
+    """Heuristic: True when the fetched page looks like a bot wall."""
+    try:
+        status = int(getattr(page, "status", 200) or 200)
+    except Exception:
+        status = 200
+    if status in (403, 429, 503):
+        return True
+    haystack = f"{_page_title(page)} {_page_text(page, limit=5000)}".lower()
+    if len(haystack.strip()) < 200:
+        # Real search/product pages are never this small; challenge stubs are.
+        return True
+    return any(marker in haystack for marker in _BLOCK_MARKERS)
+
+
+def fetch_fast(url, timeout=FAST_TIMEOUT):
+    """One Scrapling ``Fetcher`` GET with Chrome TLS impersonation.
+
+    Needs only ``pip install "scrapling[fetchers]"`` - no browser binary,
+    so it runs on Render free (512MB RAM).
+    """
+    from scrapling.fetchers import Fetcher
+
+    page = Fetcher.get(
+        url,
+        impersonate=BROWSER_IMPERSONATE,
+        stealthy_headers=True,
+        timeout=timeout,
     )
+    status = int(getattr(page, "status", 200) or 200)
+    if status >= 400:
+        raise RuntimeError(f"Fast fetch failed for {url}: HTTP {status}")
+    return page
 
-    page = context.new_page()
 
-    return browser, context, page
+def fetch_stealthy(url, timeout=STEALTHY_TIMEOUT):
+    """One Scrapling ``StealthyFetcher`` fetch (headless Chromium).
+
+    ONLY called when fast fetch looks blocked and the retailer's
+    ``fetch_mode`` allows it. Requires browsers from ``scrapling install``;
+    on a slim free-Render image without them this raises a clear
+    RuntimeError (caught per-row by app.py) instead of hanging.
+    """
+    try:
+        from scrapling.fetchers import StealthyFetcher
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(f"StealthyFetcher unavailable (import failed): {e}")
+
+    try:
+        page = StealthyFetcher.fetch(
+            url,
+            headless=True,
+            solve_cloudflare=True,
+            network_idle=True,
+            timeout=timeout * 1000,
+        )
+    except Exception as e:
+        msg = str(e)
+        if "browser" in msg.lower() or "executable" in msg.lower() or "not found" in msg.lower():
+            raise RuntimeError(
+                "Stealthy browser not installed on this host "
+                "(skip `scrapling install` for slim free-Render image). "
+                f"Original error: {e}"
+            )
+        raise RuntimeError(f"Stealthy fetch failed for {url}: {e}")
+    return page
+
+
+def fetch_with_fallback(url, mode="auto", timeout=FAST_TIMEOUT):
+    """Fetch ``url`` with Fetcher, falling back to StealthyFetcher if needed.
+
+    mode: "fast" (never touch a browser), "stealthy" (go straight to the
+    browser), "auto" (try fast, use browser only when blocked).
+    """
+    if mode == "stealthy":
+        return fetch_stealthy(url, timeout=STEALTHY_TIMEOUT)
+    if mode == "fast":
+        return fetch_fast(url, timeout=timeout)
+    # auto
+    page = fetch_fast(url, timeout=timeout)
+    try:
+        if is_blocked_page(page):
+            return fetch_stealthy(url)
+    except RuntimeError:
+        # Stealthy unavailable (e.g. slim image) or stealthy itself failed:
+        # if the fast page is usable at all, return it and let the caller's
+        # selector fallbacks decide; otherwise re-raise the stealthy error
+        # so the row is marked ok=False with a clear reason.
+        if is_blocked_page(page):
+            raise
+        return page
+    return page
+
+
+def iter_links(page, selector):
+    """Yield (href, text) for each element matching ``selector``.
+
+    Tolerant of Scrapling/Parsel API differences across versions.
+    """
+    try:
+        elements = page.css(selector)  # type: ignore[attr-defined]
+    except Exception:
+        return
+    if elements is None:
+        return
+    try:
+        count = len(elements)
+    except Exception:
+        try:
+            count = elements.length  # type: ignore[attr-defined]
+        except Exception:
+            return
+    for i in range(count or 0):
+        try:
+            el = elements[i]
+        except Exception:
+            continue
+        try:
+            href = (el.attrib.get("href") if hasattr(el, "attrib") else None) or ""
+        except Exception:
+            href = ""
+        if not href:
+            try:
+                href = (el.css("::attr(href)").get() or "")  # type: ignore[attr-defined]
+            except Exception:
+                href = ""
+        try:
+            texts = el.css("::text").getall()  # type: ignore[attr-defined]
+            text = " ".join(t.strip() for t in (texts or []) if t and t.strip())
+        except Exception:
+            try:
+                text = (getattr(el, "text", "") or "").strip()
+            except Exception:
+                text = ""
+        yield href.strip(), text.strip().lower()
+
+
+def _word_tokens(text):
+    import re as _re
+
+    return [t for t in _re.split(r"[^a-z0-9]+", (text or "").lower()) if t]
+
+
+def _stem_token(token):
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 3 and token.endswith("es"):
+        return token[:-2]
+    if len(token) > 3 and token.endswith("s"):
+        return token[:-1]
+    return token
+
+
+def rank_links(links, keyword):
+    """Rank (href, text) pairs against a search keyword.
+
+    Returns hrefs ordered by keyword-tokens-matched (desc) then extra
+    tokens (asc), so "Red Onion - UAE" beats "Red Onion Slices" and an
+    unrelated first result (e.g. a sponsored raspberry for a watermelon
+    search) never wins. Links matching zero keyword tokens are dropped.
+
+    Processed variants (sliced/paste/juice/...) are demoted as a tie-break
+    so whole produce beats "Red Onion Slices" when both match equally -
+    but match count still dominates, so an explicit "Ginger Garlic" style
+    keyword keeps its intended product.
+    """
+    key_tokens = [_stem_token(t) for t in _word_tokens(keyword)]
+    if not key_tokens:
+        return []
+    key_set = set(key_tokens)
+    processed = {
+        _stem_token(w) for w in (
+            "slice", "slices", "sliced", "paste", "juice", "juices", "powder",
+            "dice", "diced", "chop", "chopped", "mince", "minced", "puree",
+            "pureed", "dry", "dried", "frozen", "pickle", "pickled",
+        )
+    }
+    ranked = []
+    for href, text in links:
+        if not href:
+            continue
+        slug = href.rstrip("/").rsplit("/", 1)[-1]
+        cand_tokens = [_stem_token(t) for t in _word_tokens(slug + " " + (text or ""))]
+        cand_set = set(cand_tokens)
+        matched = len(key_set & cand_set)
+        if matched == 0:
+            continue
+        # Numeric IDs, prices and hash-like slugs ("13513435",
+        # "mdk1ndk...") carry no product meaning - ignore them so a
+        # listing with more junk tokens doesn't lose to a worse product.
+        meaningful = {
+            t for t in cand_set
+            if not t.isdigit() and len(t) <= 15
+        }
+        extra = len(meaningful - key_set)
+        extra += sum(2 for t in cand_set & processed)
+        ranked.append((matched, extra, href))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return [href for _, _, href in ranked]
+
+
+def css_first_text(page, selectors):
+    """First non-empty ``::text`` across a list of CSS selectors."""
+    for selector in selectors:
+        try:
+            value = page.css(f"{selector}::text").get()  # type: ignore[attr-defined]
+        except Exception:
+            continue
+        if value and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def css_all_text(page, selector):
+    """All ``::text`` values for one selector, stripped."""
+    try:
+        values = page.css(f"{selector}::text").getall()  # type: ignore[attr-defined]
+    except Exception:
+        return []
+    return [str(v).strip() for v in (values or []) if str(v).strip()]
 
 
 def parse_weight_to_kg(text):

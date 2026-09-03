@@ -6,37 +6,30 @@ requests==2.34.2          # used by auth.py for Google OAuth token/userinfo call
 # --- Data storage ---
 pymongo[srv]==4.17.0       # MongoDB driver (users + product price history); [srv] enables mongodb+srv:// URIs
 python-dotenv==1.2.2       # loads MONGODB_URI etc. from a local .env file in dev
-openpyxl==3.1.5            # still used by migrate_to_mongo.py to read your old products.xlsx once
+openpyxl==3.1.5            # only used by scripts/migrate_to_mongo.py to read your old products.xlsx once
 
-# --- Scraper ---
-# Pinned exactly to match the Dockerfile's base image tag
-# (mcr.microsoft.com/playwright/python:v1.44.0-jammy). If you bump one,
-# bump the other - a mismatch is the most common cause of "browser not
-# found" errors at deploy time.
-playwright==1.44.0
+# --- Scraper (Scrapling, no browser needed on free Render) ---
+# Fetcher (plain HTTP + Chrome TLS impersonation) is the default path and
+# needs only this package - no `scrapling install` browser download, so the
+# image stays slim (~200MB) and fits Render free (512MB RAM).
+# StealthyFetcher (headless Chromium, Cloudflare Turnstile bypass) is used
+# ONLY as a blocked-page fallback for fetch_mode="auto" retailers (see
+# scraper/config.py). It needs browsers from `scrapling install`, which is
+# intentionally NOT run in the Dockerfile; without them the row just fails
+# with a clear error instead of crashing the job.
+scrapling[fetchers]==0.4.15
 
-# --- OCR endpoint (/api/ocr) ---
+# --- OCR endpoint (/api/ocr, optional on free Render) ---
+# Only the light image-decode deps are installed here so /api/ocr can still
+# validate uploads and return a clear "engine not installed" 503.
+# The heavy PaddleOCR engine (paddlepaddle==2.6.2 + paddleocr==2.7.3, ~1GB,
+# needs numpy<2) is intentionally NOT installed - it OOMs Render free and
+# blows the build time. To re-enable OCR on a bigger host:
+#   pip install "paddlepaddle==2.6.2" "paddleocr==2.7.3" "numpy==1.26.4"
+# (keep numpy pinned <2.0 while paddle is present; see old comment history).
 opencv-python-headless==4.11.0.86   # headless build - no GUI deps needed on a server
-
-# PINNED <2.0: opencv-python-headless and paddlepaddle==2.6.2 both ship
-# binaries compiled against numpy 1.x's C ABI. numpy 2.0 changed that ABI,
-# so numpy>=2 causes "numpy.core.multiarray failed to import" / "module
-# compiled against ABI version 0x1000009 but this version of numpy is
-# 0x2000000" at gunicorn boot. Confirmed working locally at 1.26.4.
 numpy==1.26.4
 pandas==2.2.2
-
-# PaddleOCR - the OCR engine actually used by ocr/ocr.py.
-# CPU-only build (no GPU on Render/Fly free tiers) - do NOT switch to
-# paddlepaddle-gpu, that requires CUDA and will fail to install/run here.
-#
-# PINNED exactly: ocr.py calls PaddleOCR(use_gpu=..., show_log=...), which
-# are old-style constructor args removed in PaddleOCR 3.x. paddleocr>=2.7
-# lets pip grab the latest 3.x release, which crashes at import time with
-# "ValueError: Unknown argument: use_gpu". Stay on this exact 2.x pair
-# until ocr.py is updated to the new API.
-paddlepaddle==2.6.2
-paddleocr==2.7.3
 
 # --- Production server ---
 gunicorn==26.0.0           # run with: gunicorn -w 1 -b 0.0.0.0:$PORT app:app

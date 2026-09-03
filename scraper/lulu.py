@@ -1,18 +1,27 @@
 """
-LuLu Hypermarket.
+LuLu Hypermarket via Scrapling - Fetcher first, StealthyFetcher if blocked.
 
-Confirmed working. Search is special-cased here (unlike the other sites)
-because LuLu's results only appear after actually typing into the
-on-page search box and pressing Enter, rather than a plain search URL.
+The old Playwright flow waited up to 150s for JS-rendered results. The
+static search URL usually returns the same product cards in SSR HTML, so
+plain HTTP works; fetch_mode "auto" keeps the browser strictly as a
+blocked-page fallback (never on free-Render fast path unless needed).
 """
 
 import re
 from datetime import datetime
-
-from playwright.sync_api import sync_playwright
+from urllib.parse import quote
 
 from .config import SITE_SEARCH_CONFIG
-from .utils import launch_stealth_browser, parse_weight_to_kg, parse_price_value
+from .utils import (
+    fetch_with_fallback,
+    iter_links,
+    rank_links,
+    css_first_text,
+    css_all_text,
+    _page_text,
+    parse_weight_to_kg,
+    parse_price_value,
+)
 
 SITE = "lulu"
 
@@ -24,156 +33,110 @@ KNOWN_COUNTRIES = [
 ]
 
 
-from urllib.parse import quote
+def _resolve(href, base_url):
+    href = (href or "").strip()
+    if href.startswith("/"):
+        href = base_url.rstrip("/") + href
+    return href
+
 
 def find_url(product_name):
     config = SITE_SEARCH_CONFIG[SITE]
+    mode = config.get("fetch_mode", "auto")
     result_index = config.get("result_index", 0)
 
     query = quote(product_name.strip())
     search_url = config["search_url"].format(query=query)
 
-    with sync_playwright() as p:
-        browser, context, page = launch_stealth_browser(p)
+    page = fetch_with_fallback(search_url, mode=mode)
 
-        page.goto(
-            search_url,
-            wait_until="domcontentloaded",
-            timeout=600000
-        )
+    # Ranked like carrefour: prefer the closest keyword match (fewest extra
+    # tokens) over whatever the site slots first.
+    links = [(url, _text) for url, _text in iter_links(page, config["result_selector"])]
+    hrefs = rank_links(links, product_name)
+    # Fallback: raw attr list if element iteration found nothing.
+    if not hrefs:
+        try:
+            hrefs = [
+                h for h in page.css(f"{config['result_selector']}::attr(href)").getall()  # type: ignore[attr-defined]
+                if h
+            ]
+        except Exception:
+            hrefs = []
 
-        page.wait_for_selector(
-            config["result_selector"],
-            timeout=150000
-        )
-
-        links = page.locator(config["result_selector"])
-
-        href = None
-
-        if links.count() > result_index:
-            href = links.nth(result_index).get_attribute("href")
-
-        browser.close()
+    href = hrefs[result_index] if len(hrefs) > result_index else None
 
     if not href:
         raise ValueError(f"Couldn't find '{product_name}' on {SITE}.")
 
-    if href.startswith("/"):
-        href = config["base_url"].rstrip("/") + href
-
-    return href
+    return _resolve(href, config["base_url"])
 
 
 def scrape(url):
-    with sync_playwright() as p:
-        browser, context, page = launch_stealth_browser(p)
+    config = SITE_SEARCH_CONFIG[SITE]
+    mode = config.get("fetch_mode", "auto")
+    page = fetch_with_fallback(url, mode=mode)
+    body_text = _page_text(page)
 
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(3000)
-
-        # try to expand any collapsed "details"/"specifications"/"information"
-        # section - a lot of the origin/per-unit data tends to live there and
-        # doesn't show up in body text until it's clicked open
-        expand_labels = [
-            "Product Details", "Specifications", "Product Information",
-            "Details", "Information", "Additional Information",
-        ]
-        for label in expand_labels:
-            try:
-                el = page.get_by_text(label, exact=False).first
-                if el.is_visible(timeout=1000):
-                    el.click(timeout=1000)
-                    page.wait_for_timeout(500)
-            except Exception:
-                pass
-
-        body_text = page.locator("body").inner_text()
-
-        # PRODUCT NAME
-        title = None
-
-        selectors = [
+    # PRODUCT NAME
+    title = css_first_text(
+        page,
+        [
             "h1",
             "[data-testid='product-title']",
             "[data-testid='product-name']",
             "[class*='product-title']",
-            "[class*='ProductTitle']"
-        ]
+            "[class*='ProductTitle']",
+        ],
+    )
 
-        for selector in selectors:
-            try:
-                text = page.locator(selector).first.inner_text().strip()
-                if text:
-                    title = text
-                    break
-            except Exception:
-                pass
-
-        # PRICE
-
-        price = None
-        price_value = None
-
+    # PRICE
+    price = None
+    price_value = None
+    for raw in css_all_text(page, "[data-testid='price']"):
         try:
-            price_text = page.locator("[data-testid='price']").inner_text().strip()
-
-            price_value = float(price_text)
+            price_value = float(re.search(r"\d+(?:\.\d+)?", raw).group())  # type: ignore[union-attr]
             price = f"AED {price_value:.2f}"
-
+            break
         except Exception:
+            continue
+    if price_value is None:
+        match = re.search(r"\d+\.\d{2}", body_text)
+        if match:
             try:
-                body_text = page.locator("body").inner_text()
-                match = re.search(r"\d+\.\d{2}", body_text)
-
-                if match:
-                    price_value = float(match.group())
-                    price = f"AED {price_value:.2f}"
-
-            except Exception:
+                price_value = float(match.group())
+                price = f"AED {price_value:.2f}"
+            except ValueError:
                 pass
 
-        # UNIT / PACK SIZE + PER-KG PRICE
-        # Lulu doesn't show a "AED x.xx/Kg" string like Carrefour does - the
-        # pack size (e.g. "200 g") is only in the title, so we parse that
-        # ourselves and calculate the per-kg price from the actual price.
-        value, unit = parse_weight_to_kg(title or "")
+    # UNIT / PACK SIZE + PER-KG PRICE (LuLu shows size in title, not AED/kg)
+    value, unit = parse_weight_to_kg(title or "")
+    if value is None:
+        value, unit = parse_weight_to_kg(body_text[:10000])
+    if price_value is None:
+        price_value = parse_price_value(price)
 
-        if value is None:
-            # fall back to searching the whole page text in case the size
-            # is shown somewhere else (e.g. a variant selector) but not in <h1>
-            value, unit = parse_weight_to_kg(body_text)
+    per_kg_price = None
+    if value and price_value is not None and value > 0:
+        if unit == "kg":
+            per_kg_price = f"AED {price_value / value:.2f}/kg"
+        elif unit == "l":
+            per_kg_price = f"AED {price_value / value:.2f}/L"
 
-        if price_value is None:
-            price_value = parse_price_value(price)
+    # COUNTRY OF ORIGIN
+    country_of_origin = "United Arab Emirates"
+    if title:
+        lower_title = title.lower()
+        for country in KNOWN_COUNTRIES:
+            if country.lower() in lower_title:
+                country_of_origin = country
+                break
 
-        per_kg_price = None
-        if value and price_value is not None:
-
-            if unit == "kg":
-                per_kg_price = f"AED {price_value / value:.2f}/kg"
-
-            elif unit == "l":
-                per_kg_price = f"AED {price_value / value:.2f}/L"
-
-        # COUNTRY OF ORIGIN
-        country_of_origin = "United Arab Emirates"
-
-        if title:
-            lower_title = title.lower()
-
-            for country in KNOWN_COUNTRIES:
-                if country.lower() in lower_title:
-                    country_of_origin = country
-                    break
-
-        browser.close()
-
-        return {
-            "product": title,
-            "per_kg_price": per_kg_price,
-            "country_of_origin": country_of_origin,
-            "url": url,
-            "supermarket": "lulu",
-            "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
+    return {
+        "product": title,
+        "per_kg_price": per_kg_price,
+        "country_of_origin": country_of_origin,
+        "url": url,
+        "supermarket": "lulu",
+        "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }

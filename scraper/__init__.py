@@ -17,9 +17,7 @@ To add a new retailer:
   3. Import it below and add one line each to _FINDERS and _SCRAPERS.
 That's it - app.py and products_config.py don't need to change.
 
-Price storage lives in MongoDB (see mongo_store.py / db.py) rather than
-products.xlsx. excel_store.py is kept in the repo only as a reference for
-anyone who still wants a spreadsheet export - it isn't wired up anymore.
+Price storage lives in MongoDB (see mongo_store.py / db.py).
 """
 
 from .config import SITE_SEARCH_CONFIG

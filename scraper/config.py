@@ -30,26 +30,37 @@ SITE_SEARCH_CONFIG = {
         "base_url": "https://www.carrefouruae.com",
         "search_url": "https://www.carrefouruae.com/mafuae/en/search?keyword={query}",
         "result_selector": "a[href*='/p/']",
+        # JS-heavy search; try fast HTTP first, use StealthyFetcher only if blocked.
+        "fetch_mode": "auto",
     },
     "lulu": {
         "search_url": "https://gcc.luluhypermarket.com/en-ae/list/?search_text={query}",
         "result_selector": "a[href*='/p/']",
         "base_url": "https://gcc.luluhypermarket.com",
-        "result_index": 0
+        "result_index": 0,
+        "fetch_mode": "auto",
     },
     "barakat": {
         "search_url": "https://barakatfresh.ae/search?key={query}",
         "result_selector": "a[href$='.html']",
         "base_url": "https://barakatfresh.ae",
+        # Slug-guess + static product pages work fine over plain HTTP.
+        "fetch_mode": "fast",
     },
     "kibsons": {
         "search_url": "https://www.kibsons.com/en/search/{query}",
         "result_selector": "a[href*='/product/']",
         "base_url": "https://www.kibsons.com",
+        "fetch_mode": "auto",
     },
     "unioncoop": {
-        "search_url": "https://www.unioncoop.ae/en/catalogsearch/result/?q={query}",
+        "search_url": "https://www.unioncoop.ae/catalogsearch/result/?q={query}",
         "result_selector": "a.result",
         "base_url": "https://www.unioncoop.ae",
+        # Search listing is JS-rendered: try plain HTTP first, then the
+        # stealthy browser only when it yields no product links.
+        # Product pages themselves are server-rendered (span.base,
+        # data-price-amount), so scrape() stays on plain HTTP.
+        "fetch_mode": "auto",
     },
 }

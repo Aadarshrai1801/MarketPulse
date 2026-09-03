@@ -2,13 +2,22 @@ import os
 import re
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-import werkzeug
 from flask import Flask, request, jsonify, render_template
-import cv2
-import numpy as np
 
-from ocr.ocr import preprocess_image, run_ocr, extract_table
+# OCR is optional on free Render (heavy Paddle deps not installed).
+# If unavailable, /api/ocr returns a clear 503 instead of crashing boot.
+try:
+    import cv2
+    import numpy as np
+    from ocr.ocr import preprocess_image, run_ocr, extract_table
+    OCR_AVAILABLE = True
+except Exception:  # ImportError, OOM-prone paddle missing, etc.
+    cv2 = None  # type: ignore
+    np = None  # type: ignore
+    preprocess_image = run_ocr = extract_table = None  # type: ignore
+    OCR_AVAILABLE = False
 
 from scraper import (
     SITE_SEARCH_CONFIG,
@@ -16,12 +25,10 @@ from scraper import (
     get_product_details,
     save_price_record,
     get_price_history,
-    save_latest_fetch, 
+    save_latest_fetch,
     get_latest_fetch,
 )
 from products_config import (
-    PRODUCTS,
-    PRODUCTS_BY_ID,
     RETAILER_LABELS,
     get_search_keyword,
     get_all_products,
@@ -34,11 +41,11 @@ from db import get_db, get_status as get_db_status
 
 app = Flask(__name__)
 
-# All persistent data (users.db via USERS_DB_PATH, the uploads folder,
-# products.xlsx, and the cached secret.key fallback below) lives under
-# DATA_DIR. Point this at your host's mounted volume in production (e.g.
-# DATA_DIR=/app/data on Railway) - anything written outside a mounted
-# volume is lost on the next redeploy/restart.
+# All local runtime state (the uploads folder and the cached secret.key
+# fallback below) lives under DATA_DIR. Point this at your host's mounted
+# volume in production (e.g. DATA_DIR=/app/data on Railway) - anything
+# written outside a mounted volume is lost on the next redeploy/restart.
+# (Persistent app data itself lives in MongoDB, not local files.)
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -81,7 +88,7 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 # the /api/ocr endpoint against memory exhaustion from oversized images.
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
-init_auth(app)          # creates users.db + seeds a default admin if empty
+init_auth(app)          # ensures MongoDB indexes + seeds a default admin if empty
 app.register_blueprint(auth_bp)
 
 UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
@@ -288,7 +295,7 @@ def api_db_status():
 
 
 # ------------------------------------------------------------------
-# API: fetch fresh prices (runs the scraper, appends to products.xlsx)
+# API: fetch fresh prices (runs the scraper, upserts into MongoDB)
 # ------------------------------------------------------------------
 
 @app.route("/api/fetch", methods=["POST"])
@@ -330,10 +337,41 @@ def api_fetch():
 # API: async jobs (submit now, poll for progress/results later)
 # ------------------------------------------------------------------
 
+# Free Render has 0.5 CPU / 512MB RAM: Scrapling Fetcher rows are I/O-bound
+# (~2-5s each), so a small thread pool cuts all/all (40 lookups) from
+# minutes to ~30s without the RAM spike a browser pool would cause.
+FETCH_WORKERS = int(os.environ.get("FETCH_WORKERS", "5"))
+
+
 def _run_fetch_job(job_id, retailers, products):
-    for product in products:
-        for retailer in retailers:
-            result = _scrape_one(product, retailer)
+    pairs = [(product, retailer) for product in products for retailer in retailers]
+    if not pairs:
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is not None:
+                job["status"] = "done"
+                job["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return
+
+    workers = max(1, min(FETCH_WORKERS, len(pairs)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_pair = {
+            pool.submit(_scrape_one, product, retailer): (product, retailer)
+            for product, retailer in pairs
+        }
+        for future in as_completed(future_to_pair):
+            try:
+                result = future.result()
+            except Exception as e:  # _scrape_one never raises, but stay safe
+                product, retailer = future_to_pair[future]
+                result = {
+                    "ok": False,
+                    "supermarket": retailer,
+                    "product_id": product["id"],
+                    "product_label": product["name"],
+                    "product_emoji": product.get("emoji", "🥬"),
+                    "error": str(e),
+                }
 
             with JOBS_LOCK:
                 job = JOBS.get(job_id)
@@ -545,9 +583,15 @@ def api_latest():
 @role_required("editor", "admin")
 def api_ocr_scan():
     """
-    Bridge API endpoint accepting multipart image forms from api.js 
+    Bridge API endpoint accepting multipart image forms from api.js
     and returning structured token maps matching the frontend expectations.
+    Disabled with a clear 503 on slim free-Render builds without PaddleOCR.
     """
+    if not OCR_AVAILABLE:
+        return jsonify({
+            "ok": False,
+            "error": "OCR engine not installed on this host (slim free-Render build).",
+        }), 503
     if 'image' not in request.files:
         return jsonify({"ok": False, "error": "No image file part found in request form parameters."}), 400
         

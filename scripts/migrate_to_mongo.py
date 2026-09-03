@@ -4,8 +4,8 @@ products.xlsx, and a Firebase CSV export) into MongoDB. Safe to re-run -
 everything is upserted by its natural key, so running it twice won't
 create duplicates.
 
-Usage:
-    python migrate_to_mongo.py
+Usage (from the repo root):
+    python scripts/migrate_to_mongo.py
 
 Requires MONGODB_URI (and optionally MONGO_DB_NAME) to already be set in
 your environment or a local .env file - see README's Environment
@@ -16,7 +16,11 @@ Firebase CSV - this only reads them.
 import csv
 import os
 import sqlite3
+import sys
 from datetime import datetime
+
+# Allow running as `python scripts/migrate_to_mongo.py` from the repo root.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from openpyxl import load_workbook
 

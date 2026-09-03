@@ -2,9 +2,8 @@
 Persistence: upserts one scrape result as a document in the `price_history`
 MongoDB collection.
 
-Same behavior as the old excel_store.py it replaces: one document per
-(product, retailer, day) - if a scrape already ran today for this
-product+retailer, it's overwritten in place rather than duplicated.
+One document per (product, retailer, day) - if a scrape already ran today
+for this product+retailer, it's overwritten in place rather than duplicated.
 """
 
 from db import get_db

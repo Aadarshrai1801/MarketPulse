@@ -11,16 +11,18 @@ editor / admin), and optional "Continue with Google" sign-in.
 
 - `scraper/` — a package, split one file per retailer so you can fix or
   extend one site without touching the others:
-  - `config.py` — `SITE_SEARCH_CONFIG`. Edit search URLs/selectors here.
-  - `utils.py` — shared helpers used by more than one retailer
-    (`launch_stealth_browser`, `parse_weight_to_kg`, `parse_price_value`).
+  - `config.py` — `SITE_SEARCH_CONFIG` plus per-retailer `fetch_mode`
+    (`"fast"` = plain HTTP only, `"auto"` = HTTP first with a stealthy
+    browser fallback if blocked). Edit search URLs/selectors here.
+  - `utils.py` — shared helpers: `fetch_with_fallback` (Scrapling
+    `Fetcher` by default, `StealthyFetcher` only when needed),
+    `parse_weight_to_kg`, `parse_price_value`.
   - `carrefour.py`, `lulu.py`, `barakat.py`, `kibsons.py`, `unioncoop.py`
     — each has just two functions: `find_url(product_name)` and
     `scrape(url)`.
   - `mongo_store.py` — `save_price_record` / `get_price_history`,
     including the "update today's record instead of duplicating it"
-    logic (upsert on product+retailer+date). Replaces the old
-    `excel_store.py`, which is kept only for reference and isn't wired up.
+    logic (upsert on product+retailer+date).
   - `__init__.py` — the only file anything outside `scraper/` imports
     from. Re-exports `SITE_SEARCH_CONFIG`, `find_product_url`,
     `get_product_details`, `save_price_record`, `get_price_history`.
@@ -40,8 +42,8 @@ editor / admin), and optional "Continue with Google" sign-in.
   collection), three roles (viewer / editor / admin), optional Google
   OAuth. Also seeds a default admin account on first run (see
   **Environment variables** below — set these before your first deploy).
-- `migrate_to_mongo.py` — one-time script that copies your existing
-  `users.db` and `products.xlsx` into MongoDB. Safe to re-run.
+- `scripts/migrate_to_mongo.py` — one-time script that copies your
+  existing `users.db` and `products.xlsx` into MongoDB. Safe to re-run.
 - `app.py` — Flask backend:
   - `GET /api/meta` — retailer + product lists for the dropdowns.
   - `POST /api/fetch` — **synchronous.** Runs the scraper for the
@@ -78,7 +80,7 @@ python -m venv venv
 source venv/bin/activate        # on Windows: venv\Scripts\activate
 
 pip install -r requirements.txt
-playwright install chromium
+# No browser install needed - scraping uses Scrapling's plain-HTTP Fetcher.
 ```
 
 ## Environment variables
@@ -118,9 +120,9 @@ via `python-dotenv` (see `db.py`).
    host's environment/secrets panel in production).
 5. **Migrate existing data (optional, one-time).** If you already have
    `users.db` / `products.xlsx` from before this migration, run:
-   ```bash
-   python migrate_to_mongo.py
-   ```
+    ```bash
+    python scripts/migrate_to_mongo.py
+    ```
    This copies both into MongoDB without touching or deleting the
    original files. Safe to re-run.
 6. **Start the app as usual** (`python app.py`). On startup it connects,
@@ -180,10 +182,13 @@ Before pointing a real domain at this app:
    started on one worker won't be visible when another worker handles
    the poll request. Either run `-w 1`, or move `JOBS` to Redis/a DB if
    you need to scale.
-6. **Playwright needs a real headless Chromium on the host**
-   (`playwright install --with-deps chromium`). Confirm your hosting
-   tier supports this — it's memory/CPU heavier than a typical web
-   dyno.
+6. **No browser needed.** Scraping uses Scrapling's plain-HTTP
+    `Fetcher` (Chrome TLS impersonation, no Chromium binary), so the
+    slim `python:3.11-slim` image fits free-tier hosts. The
+    `StealthyFetcher` browser fallback only triggers for
+    `fetch_mode="auto"` retailers when plain HTTP looks blocked — and is
+    skipped entirely on images without browsers (the row just fails with
+    a clear error).
 7. **Rate-limit `/api/auth/login`** (e.g. with `Flask-Limiter`) — it's
    currently unthrottled and brute-forceable.
 8. Double-check `.gitignore` excludes `secret.key`, `users.db`,
@@ -192,16 +197,11 @@ Before pointing a real domain at this app:
 
 ## Notes
 
-- Each lookup spins up a real headless Chrome via Playwright, so one
-  retailer × one product takes a few seconds, and leaving both
-  dropdowns on "All" runs 5 × 8 = 40 lookups one after another — figure
-  several minutes.
+- Each lookup is a plain HTTP fetch (no browser), so one retailer × one
+  product takes a couple of seconds, and jobs fan out over a small thread
+  pool (`FETCH_WORKERS`, default 5) — "all"/"all" (5 × 8 = 40 lookups)
+  finishes in well under a minute.
 - Barakat, Kibsons, and Union Coop selectors in `scraper/config.py` are
   marked as best-effort guesses — if a lookup fails or grabs the wrong
   product for those three, inspect the live search results page and
-  update `result_selector` in that retailer's own file under
-  `scraper/`.
-- If Playwright can't launch Chrome, run `playwright install chromium`
-  again, or drop `channel="chrome"` from the `launch()` calls in
-  `scraper/utils.py` (and in `scraper/barakat.py`'s `find_url`) to use
-  Playwright's bundled Chromium instead of your system Chrome.
+  update `result_selector` in `scraper/config.py`.

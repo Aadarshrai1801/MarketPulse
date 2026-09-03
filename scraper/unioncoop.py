@@ -1,21 +1,24 @@
 """
-Union Coop.
+Union Coop via Scrapling - fast HTTP first, StealthyFetcher only if needed.
 
-NOTE: result_selector for this site is now "a.product-item-link", matching
-Magento 2's default catalog-search results markup (confirmed by the product
-URL pattern, e.g. https://www.unioncoop.ae/orange-navel-...html). If this
-still fails, check the debug print below for the page title/url that was
-actually reached — that usually tells you if it's a selector mismatch or a
-bot-block/redirect.
+The search listing is JS-rendered (static fetch returns the page shell with
+no product links), so find_url() retries via the stealthy browser when the
+fast pass yields nothing. Product pages themselves are server-rendered
+(span.base, data-price-amount), so scrape() stays on plain HTTP.
 """
 
 import re
 from datetime import datetime
 
-from playwright.sync_api import sync_playwright
-
 from .config import SITE_SEARCH_CONFIG
-from .utils import launch_stealth_browser
+from .utils import (
+    fetch_with_fallback,
+    fetch_stealthy,
+    iter_links,
+    rank_links,
+    css_first_text,
+    _page_text,
+)
 
 SITE = "unioncoop"
 
@@ -27,253 +30,158 @@ KNOWN_COUNTRIES = [
 ]
 
 
+def _resolve(href, base_url):
+    href = (href or "").strip()
+    if href.startswith("/"):
+        href = base_url.rstrip("/") + href
+    return href
+
+
+def _collect_hrefs(page, config, product_name):
+    """(best_match_href, first_href) across the known result selectors.
+
+    Best match = closest keyword match (fewest extra tokens), so a whole
+    "Red Onion" beats "Red Onion Slices" and ranking decides instead of
+    whatever the site slots first.
+    """
+    first_href = None
+    candidates = []
+    for selector in (config["result_selector"], "a.product-item-link"):
+        for url, text in iter_links(page, selector):
+            if not url:
+                continue
+            if first_href is None:
+                first_href = url
+            candidates.append((url, text))
+        if first_href is not None:
+            continue
+        # Fallback: raw attr list if element iteration found nothing.
+        try:
+            raw = page.css(f"{selector}::attr(href)").get()  # type: ignore[attr-defined]
+        except Exception:
+            raw = None
+        if raw and first_href is None:
+            first_href = raw
+    ranked = rank_links(candidates, product_name)
+    return (ranked[0] if ranked else None), first_href
+
+
 def find_url(product_name):
     config = SITE_SEARCH_CONFIG[SITE]
+    mode = config.get("fetch_mode", "auto")
 
     query = product_name.strip().replace(" ", "%20")
     search_url = config["search_url"].format(query=query)
 
-    with sync_playwright() as p:
-        browser, context, page = launch_stealth_browser(p)
+    page = fetch_with_fallback(search_url, mode=mode)
+    href, first_href = _collect_hrefs(page, config, product_name)
 
-        page.goto(
-            search_url,
-            wait_until="domcontentloaded",
-            timeout=600000
-        )
+    if href is None and first_href is None and mode != "fast":
+        # Static fetch returned the JS shell with no product links - render
+        # the listing once via the stealthy browser (only path that uses it
+        # for this retailer). On slim hosts without browsers this raises a
+        # clear RuntimeError, surfaced per-row by app.py.
+        page = fetch_stealthy(search_url)
+        href, first_href = _collect_hrefs(page, config, product_name)
 
-        page.wait_for_timeout(4000)
-
-        href = None
-
-        # Use the selector that actually works
-        links = page.locator("a.result")
-
-        count = links.count()
-
-        for i in range(count):
-
-            try:
-
-                link = links.nth(i)
-
-                text = link.inner_text().strip().lower()
-                url = link.get_attribute("href")
-
-                if not url:
-                    continue
-
-                if product_name.lower() in text:
-                    href = url
-                    break
-
-            except Exception:
-                continue
-
-        # Fallback to first result
-        if href is None and count > 0:
-            href = links.first.get_attribute("href")
-
-        if href is None:
-            print(
-                f"[unioncoop] 0 results for '{product_name}' — "
-                f"page title: {page.title()!r}, url: {page.url}"
-            )
-
-        browser.close()
-
+    href = href or first_href
     if not href:
+        print(f"[unioncoop] 0 results for '{product_name}' - url: {search_url}")
         raise ValueError(f"Couldn't find '{product_name}' on {SITE}.")
 
-    if href.startswith("/"):
-        href = config["base_url"].rstrip("/") + href
-
-    return href
+    return _resolve(href, config["base_url"])
 
 
 def scrape(url):
-    with sync_playwright() as p:
+    config = SITE_SEARCH_CONFIG[SITE]
+    mode = config.get("fetch_mode", "fast")
+    page = fetch_with_fallback(url, mode=mode)
+    body_text = _page_text(page)
 
-        browser = p.chromium.launch(
-            headless=True,
-            channel="chrome"
-        )
+    # ---------------------------------------------------------
+    # PRODUCT NAME (Magento 2 uses span.base on product pages)
+    # ---------------------------------------------------------
+    title = css_first_text(page, ["span.base", "h1"])
+    if not title:
+        m = re.search(r"<title>(.*?)</title>", body_text, re.IGNORECASE | re.DOTALL)
+        title = m.group(1).strip()[:200] if m else None
 
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            viewport={"width": 1366, "height": 768},
-            locale="en-US",
-        )
-
-        context.add_init_script("""
-            Object.defineProperty(navigator,'webdriver',{
-                get:()=>undefined
-            });
-        """)
-
-        page = context.new_page()
-
-        page.goto(
-            url,
-            wait_until="domcontentloaded",
-            timeout=60000
-        )
-
-        page.wait_for_timeout(3000)
-
-        # ---------------------------------------------------------
-        # PRODUCT NAME
-        # ---------------------------------------------------------
-
-        title = None
-
-        try:
-            title = page.locator("span.base").first.inner_text().strip()
-        except Exception:
-            pass
-
-        # ---------------------------------------------------------
-        # COUNTRY OF ORIGIN
-        # ---------------------------------------------------------
-
-        country_of_origin = "United Arab Emirates"
-
-        original_title = title  # Keep original title for weight extraction
-
-        if original_title:
-            lower_title = original_title.lower()
-
-            for country in KNOWN_COUNTRIES:
-                if country.lower() in lower_title:
-                    country_of_origin = country
-                    break
-
-            # Remove country from display title only
-            title = original_title
-
-            for country in KNOWN_COUNTRIES:
-                title = re.sub(
-                    rf"\s*-\s*{re.escape(country)}",
-                    "",
-                    title,
-                    flags=re.IGNORECASE
-                )
-
-            # Remove trailing weight from display title
+    # ---------------------------------------------------------
+    # COUNTRY OF ORIGIN (parsed from title; Magento rarely exposes it)
+    # ---------------------------------------------------------
+    country_of_origin = "United Arab Emirates"
+    original_title = title
+    if original_title:
+        lower_title = original_title.lower()
+        for country in KNOWN_COUNTRIES:
+            if country.lower() in lower_title:
+                country_of_origin = country
+                break
+        for country in KNOWN_COUNTRIES:
             title = re.sub(
-                r"\s*-\s*\d+(?:\.\d+)?\s*(kg|g)\b",
-                "",
-                title,
-                flags=re.IGNORECASE
-            ).strip()
+                rf"\s*-\s*{re.escape(country)}", "", title,
+                flags=re.IGNORECASE,
+            )
+        title = re.sub(
+            r"\s*-\s*\d+(?:\.\d+)?\s*(kg|g)\b", "", title,
+            flags=re.IGNORECASE,
+        ).strip()
 
-        # ---------------------------------------------------------
-        # PER KG PRICE
-        # ---------------------------------------------------------
+    # ---------------------------------------------------------
+    # PER-KG PRICE (Magento price-box + data-price-amount)
+    # ---------------------------------------------------------
+    per_kg_price = None
+    try:
+        box_texts = page.css("div.price-box.price-final_price ::text").getall()  # type: ignore[attr-defined]
+        box_text = " ".join(t.strip() for t in (box_texts or []) if t.strip())
+    except Exception:
+        box_text = ""
+    if not box_text:
+        box_text = body_text[:5000]
 
-        per_kg_price = None
-
-        try:
-
-            price_box = page.locator(
-                "div.price-box.price-final_price"
-            ).first
-
-            box_text = price_box.inner_text().strip()
-
-            # ------------------------
-            # PRODUCT PRICE
-            # ------------------------
-
-            price = None
-
-            # Best source
+    price = None
+    try:
+        amount = page.css("div.price-box [data-price-amount]::attr(data-price-amount)").get()  # type: ignore[attr-defined]
+        if amount:
+            price = float(str(amount).strip())
+    except Exception:
+        price = None
+    if price is None:
+        m = re.search(r"([\d]+\.[\d]{2})", box_text)
+        if m:
             try:
-                price = float(
-                    price_box.locator("[data-price-amount]").first.get_attribute("data-price-amount") #type: ignore
+                price = float(m.group(1))
+            except ValueError:
+                price = None
+
+    if price is not None:
+        if re.search(r"/\s*kg\b", box_text, re.IGNORECASE):
+            per_kg_price = f"AED {price:.2f}/kg"
+        else:
+            weight_match = re.search(
+                r"/\s*(\d+(?:\.\d+)?)\s*(kg|g)\b", box_text, re.IGNORECASE,
+            )
+            if not weight_match and original_title:
+                weight_match = re.search(
+                    r"(\d+(?:\.\d+)?)\s*(kg|g)\b", original_title, re.IGNORECASE,
                 )
-            except:
-                pass
-
-            # Fallback
-            if price is None:
-
-                price_text = price_box.locator(
-                    "span.price.price-currency-symbol"
-                ).first.inner_text().strip()
-
-                match = re.search(
-                    r"([\d.]+)",
-                    price_text
-                )
-
-                if match:
-                    price = float(match.group(1))
-
-            if price is None:
-                raise Exception("Price not found")
-
-            # ------------------------
-            # Already per Kg
-            # Example:
-            # AED 4.95 / Kg
-            # ------------------------
-
-            if re.search(r"/\s*kg\b", box_text, re.IGNORECASE):
-
+            if weight_match:
+                weight = float(weight_match.group(1))
+                if weight_match.group(2).lower() == "g":
+                    weight /= 1000
+                if weight > 0:
+                    per_kg_price = f"AED {price / weight:.2f}/kg"
+            if per_kg_price is None:
                 per_kg_price = f"AED {price:.2f}/kg"
 
-            else:
+    if per_kg_price is None:
+        print(f"[unioncoop] Price Error: no price found at {url}")
 
-                # ------------------------
-                # Weight from price section
-                # Example:
-                # /500g
-                # /100g
-                # /2kg
-                # ------------------------
-
-                weight_match = re.search(
-                    r"/\s*(\d+(?:\.\d+)?)\s*(kg|g)\b",
-                    box_text,
-                    re.IGNORECASE
-                )
-
-                # ------------------------
-                # If not found, extract from ORIGINAL title
-                # ------------------------
-
-                if not weight_match and original_title:
-
-                    weight_match = re.search(
-                        r"(\d+(?:\.\d+)?)\s*(kg|g)\b",
-                        original_title,
-                        re.IGNORECASE
-                    )
-
-                if weight_match:
-
-                    weight = float(weight_match.group(1))
-                    unit = weight_match.group(2).lower()
-
-                    if unit == "g":
-                        weight /= 1000
-
-                    if weight > 0:
-                        per_kg_price = f"AED {price / weight:.2f}/kg"
-
-        except Exception as e:
-            print(f"[unioncoop] Price Error: {e}")
-
-        browser.close()
-
-        return {
-
-            "product": title,
-            "per_kg_price": per_kg_price,
-            "country_of_origin": country_of_origin,
-            "url": url,
-            "supermarket": "unioncoop",
-            "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-
-        }
+    return {
+        "product": title,
+        "per_kg_price": per_kg_price,
+        "country_of_origin": country_of_origin,
+        "url": url,
+        "supermarket": "unioncoop",
+        "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
