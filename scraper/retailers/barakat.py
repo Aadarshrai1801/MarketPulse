@@ -29,8 +29,16 @@ SITEMAP_TTL_SECONDS = 12 * 60 * 60
 
 # Keywords whose best sitemap match is ambiguous (e.g. "Watermelon Juice"
 # would score the juice SKUs over the fruit) get a pinned canonical URL.
+# "navel orange" is pinned too: Barakat delisted ALL navel oranges
+# site-wide (verified 2026-09-03, still gone 2026-09-05), so per request it
+# falls back to the regular fresh orange (Orange Valencia 1kg, verified
+# live 2026-09-05: 200 + h1 + AED price). The pinned URL is still
+# re-verified live on every lookup, so a rename/delist fails loudly
+# instead of recording a stale price. Note this means Orange Navel and
+# Orange Valencia currently share one Barakat page/price by design.
 URL_OVERRIDES = {
     "watermelon": "https://barakatfresh.ae/en/watermelon-sliced-500g.html",
+    "navel orange": "https://barakatfresh.ae/orange-valencia-1kg.html",
 }
 
 _sitemap_cache = {"at": 0.0, "urls": []}

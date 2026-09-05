@@ -559,6 +559,10 @@ body {
     gap: 4px;
 }
 
+.error-list .skipped {
+    color: var(--dim);
+}
+
 .summary {
     display: flex;
     gap: 8px;

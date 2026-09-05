@@ -9,6 +9,7 @@ import os
 import re
 
 from catalog import (
+    RETAILER_PRODUCT_SKIPS,
     get_search_keyword,
     get_all_products,
     get_all_products_by_id,
@@ -83,7 +84,28 @@ def resolve_products(product_param):
 
 def scrape_one(product, retailer):
     """Run one product x retailer lookup, save it if it succeeds, and
-    always return a plain-dict result (never raises)."""
+    always return a plain-dict result (never raises).
+
+    Known stockouts (catalog.RETAILER_PRODUCT_SKIPS, e.g. Barakat navel
+    oranges delisted site-wide) short-circuit here without any network
+    call: the result carries ``skipped=True`` so the UI / job runner can
+    show it as info rather than a scary ⚠ failure, and nothing is written
+    to MongoDB. scripts/push_retailer.py also checks the same set before
+    calling this, so scheduled pushes keep logging SKIP there.
+    """
+    if (retailer, product["id"]) in RETAILER_PRODUCT_SKIPS:
+        keyword = get_search_keyword(product, retailer)
+        return {
+            "ok": False,
+            "skipped": True,
+            "supermarket": retailer,
+            "product_id": product["id"],
+            "product_label": product["name"],
+            "product_emoji": product["emoji"],
+            "keyword_used": keyword,
+            "error": f"Delisted on {retailer.capitalize()} (known stockout — skipped).",
+        }
+
     keyword = get_search_keyword(product, retailer)
 
     try:

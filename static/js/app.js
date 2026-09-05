@@ -1088,20 +1088,27 @@ async function fetchLatestPrices() {
 
     console.log('[MarketPulse] Job finished, raw results:', currentJob.results);
 
-    const failures = currentJob.results.filter((item) => !item.ok);
-    const successes = currentJob.results.length - failures.length;
+    const skipped = currentJob.results.filter((item) => !item.ok && item.skipped);
+    const failures = currentJob.results.filter((item) => !item.ok && !item.skipped);
+    const successes = currentJob.results.filter((item) => item.ok).length;
+    const attempted = currentJob.results.length - skipped.length;
 
     statusLine.classList.add('ok');
-    statusLine.textContent = `Fetched ${successes}/${currentJob.results.length} price(s).`;
+    statusLine.textContent = `Fetched ${successes}/${attempted} price(s).` +
+      (skipped.length ? ` · ${skipped.length} skipped (delisted).` : '');
 
-    if (failures.length) {
-      console.warn('[MarketPulse] Failed items:', failures);
-      errorList.innerHTML = failures
-        .map((item) => `<div>⚠ ${escapeHtml(item.product_label || '')} @ ${escapeHtml(item.supermarket || '')}: ${escapeHtml(item.error || '')}</div>`)
-        .join('');
+    if (failures.length || skipped.length) {
+      console.warn('[MarketPulse] Failed items:', failures, 'Skipped items:', skipped);
+      errorList.innerHTML =
+        failures
+          .map((item) => `<div>⚠ ${escapeHtml(item.product_label || '')} @ ${escapeHtml(item.supermarket || '')}: ${escapeHtml(item.error || '')}</div>`)
+          .join('') +
+        skipped
+          .map((item) => `<div class="skipped">ℹ ${escapeHtml(item.product_label || '')} @ ${escapeHtml(item.supermarket || '')}: ${escapeHtml(item.error || '')}</div>`)
+          .join('');
     }
 
-    const freshRows = currentJob.results.filter((item) => item.ok !== false).map((item) => mapScrapeResult(item));
+    const freshRows = currentJob.results.filter((item) => item.ok === true).map((item) => mapScrapeResult(item));
     console.log('[MarketPulse] Mapped fresh rows from this fetch:', freshRows);
     lastDetail = mergeDetailRows(lastDetail, freshRows);
     savePersistedDetail(lastDetail);

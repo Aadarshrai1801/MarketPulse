@@ -93,7 +93,7 @@ PRODUCTS = [
         "name": "Orange Navel",
         "emoji": "🍊",
         "keywords": {
-            "barakat": "orange navel",
+            "barakat": "orange",
             "kibsons": "orange navel",
             "unioncoop": "navel orange",
             "carrefour": "Orange Navel",
@@ -219,10 +219,12 @@ def delete_custom_product(product_id):
 # failure) - the skip applies to scheduled pushes only, where a daily
 # red run over a known-delisted product would just train everyone to
 # ignore failures. Remove the entry when the site relists the product.
+#
+# Currently empty. History: ("barakat", "orange_navel") used to be here
+# (Barakat delisted all navel oranges site-wide, verified 2026-09-03),
+# but per request navel now falls back to Barakat's regular fresh orange
+# via the pinned "navel orange" URL in scraper/retailers/barakat.py, so
+# no skip is needed. services/fetch.py also understands the "skipped"
+# result flag if entries are ever added back.
 # ------------------------------------------------------------------
-RETAILER_PRODUCT_SKIPS = {
-    # Barakat delisted ALL navel oranges site-wide (verified 2026-09-03:
-    # all 7 navel URLs 404 from residential IP too, while their stale
-    # sitemap still lists them).
-    ("barakat", "orange_navel"),
-}
+RETAILER_PRODUCT_SKIPS = set()
