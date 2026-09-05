@@ -23,7 +23,6 @@ from datetime import datetime
 from ..config import SITE_SEARCH_CONFIG
 from ..utils import (
     fetch_fast,
-    fetch_stealthy,
     fetch_with_fallback,
     iter_links,
     rank_links,
@@ -190,20 +189,28 @@ def _product_name_words(record):
     return [t for t in _tokens(record.get("stockDesc") or "") if len(t) > 2]
 
 
-def _verify_url(url, record):
-    """Fetch candidate product page; accept it if its <h1> matches the record."""
+def _check_url(url, record):
+    """Live check with reason: fetch + h1 match. Returns (ok, reason)."""
     try:
         page = fetch_fast(url, timeout=30, site=SITE)
-    except Exception:
-        return False
+    except Exception as e:
+        return False, f"product page fetch failed ({e})"
     try:
         h1 = (page.css("h1::text").get() or "").strip().lower()  # type: ignore[attr-defined]
-    except Exception:
-        return False
+    except Exception as e:
+        return False, f"product page parse failed ({e})"
     if not h1:
-        return False
+        return False, "product page has no title"
     words = _product_name_words(record)
-    return bool(words) and any(w in h1 for w in words)
+    if bool(words) and any(w in h1 for w in words):
+        return True, "ok"
+    return False, f"h1 mismatch (got '{h1[:80]}')"
+
+
+def _verify_url(url, record):
+    """Fetch candidate product page; accept it if its <h1> matches the record."""
+    ok, _reason = _check_url(url, record)
+    return ok
 
 
 def _resolve(href, base_url):
@@ -243,15 +250,39 @@ def find_url(product_name):
     # h1 check - a renamed/delisted product fails loudly instead of
     # recording a stale price. This is what serves the hosted run.
     known = KNOWN_URLS.get(product_name.strip().lower())
-    if known and _verify_url(known, {"stockDesc": product_name}):
-        return known
+    known_ok, known_reason = (
+        _check_url(known, {"stockDesc": product_name}) if known else (False, "no known URL")
+    )
+    if known_ok:
+        return known  # type: ignore[return-value]
 
-    # Fallback 2 (browser): render the search page once via the stealthy
-    # browser and rank its product links. On slim hosts without browsers
-    # this raises a clear RuntimeError, surfaced per-row by app.py.
+    # Fallback 2 (browser): render the search page via fetch_with_fallback
+    # (fast first, stealthy only if blocked). On slim hosts without
+    # browsers fetch_with_fallback re-raises the FAST error (e.g. HTTP 403
+    # / Cloudflare from a datacenter IP), which is the actionable signal -
+    # never the Playwright "Executable doesn't exist" stack.
     query = product_name.strip().replace(" ", "%20")
     search_url = config["search_url"].format(query=query)
-    page = fetch_stealthy(search_url, wait_selector="a[href*='/product/']", site=SITE)
+    try:
+        page = fetch_with_fallback(
+            search_url,
+            mode=config.get("fetch_mode", "auto"),
+            wait_selector="a[href*='/product/']",
+            site=SITE,
+        )
+    except Exception as e:
+        msg = str(e)
+        if "Stealthy browser not installed" in msg:
+            raise ValueError(
+                f"Couldn't find '{product_name}' on {SITE}: host blocked fast HTTP"
+                f" ({known_reason}) and has no stealthy browser (slim image)."
+                f" Works locally; on Render set PROXY_{SITE.upper()}=http://user:pass@host:port"
+                f" or skip this product."
+            ) from None
+        raise ValueError(
+            f"Couldn't find '{product_name}' on {SITE}: search blocked ({e});"
+            f" known URL unverified ({known_reason})."
+        ) from None
     links = [(url, text) for url, text in iter_links(page, config["result_selector"])]
     for href in rank_links(links, product_name)[:5]:
         try:
@@ -265,7 +296,11 @@ def find_url(product_name):
         except Exception:
             continue
 
-    raise ValueError(f"Couldn't find '{product_name}' on {SITE}.")
+    raise ValueError(
+        f"Couldn't find '{product_name}' on {SITE}"
+        + (f" (known URL: {known_reason})" if known else "")
+        + "."
+    )
 
 
 def _record_from_product_url(url):
